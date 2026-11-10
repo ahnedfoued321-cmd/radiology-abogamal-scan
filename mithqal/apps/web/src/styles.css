@@ -133,3 +133,7 @@ th { color: var(--muted); font-weight: 500; font-size: 13px; }
   .cart { border-inline-start: 0; border-top: 1px solid var(--line); max-height: 50vh; }
   .two { grid-template-columns: 1fr; }
 }
+
+.assistant h3 { display: flex; align-items: center; gap: 8px; }
+.qa { border-top: 1px dashed var(--line); padding: 10px 0; display: grid; gap: 4px; }
+.suggest { background: var(--gold-soft); border-radius: 10px; padding: 8px 10px; font-size: 14px; }

@@ -290,6 +290,7 @@ function Dashboard({ me }: { me: Me }) {
         <div className="kpi"><div className="label">عدد الفواتير</div><div className="value">{d.invoices.toLocaleString("ar-SA")}</div><div className="muted">مرتجعات: {d.creditNotes.toLocaleString("ar-SA")}</div></div>
         <div className="kpi"><div className="label">ضريبة القيمة المضافة</div><div className="value">{fmt(d.vat, c)}</div></div>
       </div>
+      <Assistant />
       <div className="panel">
         <h3>الامتثال (ZATCA)</h3>
         {d.eInvoicesNeedingAttention === 0
@@ -310,6 +311,47 @@ function Dashboard({ me }: { me: Me }) {
             <table><tbody>{d.lowStock.map((l) => <tr key={l.name}><td>{l.name}</td><td className="error">{Number(l.quantity).toLocaleString("ar-SA")}</td></tr>)}</tbody></table>}
         </div>
       </div>
+    </div>
+  );
+}
+
+/* ───────────────────────── Assistant «ذهب» ───────────────────────── */
+
+interface Answer { intent: string; answer: string; suggestion?: string }
+
+function Assistant() {
+  const [q, setQ] = useState("");
+  const [log, setLog] = useState<{ q: string; a: Answer }[]>([]);
+  const [busy, setBusy] = useState(false);
+  const examples = ["كم بعنا النهارده؟", "كسبنا كام؟", "إيش الأكثر مبيعًا؟", "إيه النواقص؟", "مين عليه فلوس؟", "وضع زاتكا؟"];
+  async function send(question: string) {
+    if (!question.trim()) return;
+    setBusy(true);
+    try {
+      const a = await api<Answer>("POST", "/v1/assistant/ask", { question });
+      setLog((l) => [{ q: question, a }, ...l].slice(0, 6));
+      setQ("");
+    } catch (e) {
+      setLog((l) => [{ q: question, a: { intent: "ERROR", answer: (e as Error).message } }, ...l]);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="panel assistant">
+      <h3><span className="brand-mark" style={{ width: 26, height: 26, fontSize: 13 }}>ذ</span> اسأل «ذهب»</h3>
+      <form onSubmit={(e) => { e.preventDefault(); send(q); }} style={{ display: "flex", gap: 8 }}>
+        <input className="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="اسأل عن شغلك بلهجتك…" />
+        <button className="btn primary" disabled={busy} style={{ whiteSpace: "nowrap" }}>اسأل</button>
+      </form>
+      <div className="cats">{examples.map((x) => <button key={x} className="cat" onClick={() => send(x)}>{x}</button>)}</div>
+      {log.map((m, i) => (
+        <div key={i} className="qa">
+          <div className="muted">{m.q}</div>
+          <div>{m.a.answer}</div>
+          {m.a.suggestion && <div className="suggest">💡 {m.a.suggestion}</div>}
+        </div>
+      ))}
     </div>
   );
 }

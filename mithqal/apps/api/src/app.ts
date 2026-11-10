@@ -10,6 +10,7 @@ import { onboard } from "./services/onboarding.js";
 import { receiveGoods } from "./services/inventory.js";
 import { createSale, getInvoice, refundSale } from "./services/sales.js";
 import { dailySummary, expiringBatches, trialBalance, vatSummary } from "./services/reports.js";
+import { ask, cashierInsights } from "./services/assistant.js";
 import { checkIn, checkOut, collect, customerBalance, setupVan, todaysRoute, transferStock, vanOf, vanSettlement } from "./services/van.js";
 
 type Role = "owner" | "accountant" | "cashier" | "storekeeper" | "sales_rep";
@@ -353,6 +354,17 @@ export function buildApp(db: Db, config: Config): FastifyInstance {
   app.get("/v1/reports/expiring", { preHandler: auth("owner", "storekeeper") }, async (req) => {
     const { days } = z.object({ days: z.coerce.number().int().min(1).max(365).default(90) }).parse(req.query);
     return T(req, (tx) => expiringBatches(tx, today(), days));
+  });
+
+  // ───── AI assistant «ذهب» & insights ─────
+  app.post("/v1/assistant/ask", { preHandler: auth("owner", "accountant") }, async (req) => {
+    const { question } = z.object({ question: z.string().min(1).max(500) }).parse(req.body);
+    return T(req, (tx) => ask(tx, question));
+  });
+
+  app.get("/v1/insights/cashiers", { preHandler: auth("owner") }, async (req) => {
+    const { day } = z.object({ day: date.optional() }).parse(req.query);
+    return T(req, (tx) => cashierInsights(tx, day ?? today()));
   });
 
   // ───── Compliance ─────

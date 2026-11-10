@@ -315,3 +315,31 @@ describe("pharmacy: batches & FEFO", () => {
     expect(exp.body[0].daysLeft).toBeLessThan(0);
   });
 });
+
+describe("assistant & fraud guard (end-to-end)", () => {
+  it("answers business questions from live data", async () => {
+    const r = await call("POST", "/v1/assistant/ask", token, { question: "كم بعنا النهارده؟" });
+    expect(r.status).toBe(200);
+    expect(r.body.intent).toBe("SALES");
+    expect(r.body.answer).toMatch(/فاتور|فواتير/);
+    const c = await call("POST", "/v1/assistant/ask", token, { question: "وضع زاتكا؟" });
+    expect(c.body.intent).toBe("COMPLIANCE");
+  });
+
+  it("flags a cashier who refunds right after selling", async () => {
+    const login = await call("POST", "/v1/auth/login", undefined, { email: "cashier@cafe.test", password: "CashierPass#1" });
+    const ct = login.body.token;
+    for (let i = 0; i < 3; i++) {
+      const s = await call("POST", "/v1/pos/sales", ct, {
+        clientUuid: randomUUID(), terminalId, lines: [{ itemId: croissant.id, quantity: "1" }], payments: [{ method: "CASH", amount: "9.99" }],
+      });
+      await call("POST", `/v1/pos/sales/${s.body.id}/refund`, ct, { clientUuid: randomUUID(), reason: "إلغاء" });
+    }
+    const r = await call("GET", "/v1/insights/cashiers", token);
+    const cashier = r.body.find((x: any) => x.name === "كاشير");
+    expect(cashier.refunds).toBe(3);
+    expect(cashier.flags.length).toBeGreaterThanOrEqual(2);
+    const a = await call("POST", "/v1/assistant/ask", token, { question: "في تلاعب من الكاشيرات؟" });
+    expect(a.body.answer).toContain("كاشير");
+  });
+});
