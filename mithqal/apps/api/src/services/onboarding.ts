@@ -36,7 +36,10 @@ export async function onboard(db: Db, input: OnboardingInput) {
   const passwordHash = await bcrypt.hash(input.owner.password, 10);
 
   return withTenant(db, tenantId, async (tx) => {
-    await tx.query("INSERT INTO tenants (id, name, country) VALUES ($1,$2,$3)", [tenantId, input.businessNameAr, input.country]);
+    // Every new business starts on Free with a 14-day Pro trial (all modules unlocked).
+    await tx.query("INSERT INTO tenants (id, name, country, plan, trial_ends_at) VALUES ($1,$2,$3,'free', now() + interval '14 days')", [
+      tenantId, input.businessNameAr, input.country,
+    ]);
     const a = input.address;
     const company = await tx.query<{ id: string }>(
       `INSERT INTO companies (tenant_id, name_ar, name_en, vat_number, cr_number, street, building_number, district, city, postal_code,

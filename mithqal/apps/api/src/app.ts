@@ -5,6 +5,7 @@ import bcrypt from "bcryptjs";
 import { z, ZodError } from "zod";
 import type { Config } from "./config.js";
 import { Money } from "@mithqal/money";
+import { entitlements, PlanError, requireCapacity, requireModule, type Module } from "./services/licensing.js";
 import { BusinessError, maybeOne, withTenant, type Db } from "./db.js";
 import { audit, type Actor } from "./services/core.js";
 import { onboard } from "./services/onboarding.js";
@@ -83,7 +84,7 @@ const schemas = {
   period: z.object({ from: date, to: date }),
 };
 
-export function buildApp(db: Db, config: Config): FastifyInstance {
+export function buildApp(db: Db, config: Config, platformDb?: Db): FastifyInstance {
   const app = Fastify({ logger: process.env.NODE_ENV !== "test" });
   app.register(cors, { origin: true });
   app.register(jwt, { secret: config.jwtSecret, sign: { expiresIn: "12h" } });
@@ -91,6 +92,9 @@ export function buildApp(db: Db, config: Config): FastifyInstance {
   app.setErrorHandler((err, _req, reply) => {
     if (err instanceof ZodError) return reply.status(400).send({ error: "VALIDATION", issues: err.issues });
     const code = (err as { statusCode?: number }).statusCode;
+    if (err instanceof PlanError) {
+      return reply.status(402).send({ error: "PLAN_LIMIT", message: err.message, upgradeTo: err.upgradeTo ?? null });
+    }
     if (err instanceof BusinessError || code === 404 || code === 401 || code === 403) {
       return reply.status(code ?? 422).send({ error: err.name, message: err.message });
     }
@@ -113,6 +117,12 @@ export function buildApp(db: Db, config: Config): FastifyInstance {
   const actorOf = (req: FastifyRequest): Actor => ({ userId: req.user.sub, tenantId: req.user.tid, role: req.user.role });
   const T = <R>(req: FastifyRequest, fn: Parameters<typeof withTenant<R>>[2]) => withTenant<R>(db, req.user.tid, fn);
   const today = () => new Date().toISOString().slice(0, 10);
+  /** Tenant transaction that first checks the plan includes `module`. */
+  const TM = <R>(req: FastifyRequest, module: Module, fn: Parameters<typeof withTenant<R>>[2]) =>
+    withTenant<R>(db, req.user.tid, async (tx) => {
+      await requireModule(tx, module);
+      return fn(tx);
+    });
 
   app.get("/health", async () => ({ ok: true, service: "mithqal-api", time: new Date().toISOString() }));
 
@@ -144,6 +154,57 @@ export function buildApp(db: Db, config: Config): FastifyInstance {
     }),
   );
 
+  // ───── Subscription ─────
+  app.get("/v1/subscription", { preHandler: auth("owner") }, async (req) =>
+    T(req, async (tx) => {
+      const e = await entitlements(tx);
+      const usage = (await tx.query<{ users: number; terminals: number; vans: number }>(
+        `SELECT (SELECT count(*)::int FROM users WHERE active) AS users, (SELECT count(*)::int FROM pos_terminals) AS terminals,
+                (SELECT count(*)::int FROM van_assignments) AS vans`,
+      )).rows[0];
+      const plans = (await tx.query("SELECT code, name_ar, name_en, price_monthly, max_users, max_terminals, max_vans, modules FROM plans ORDER BY price_monthly, code")).rows;
+      return { ...e, usage, plans };
+    }),
+  );
+
+  // ───── Platform admin (Mithqal operator only) ─────
+  const platform = async (req: FastifyRequest, reply: FastifyReply) => {
+    const key = req.headers["x-platform-key"];
+    if (!platformDb || !config.platformKey || key !== config.platformKey) {
+      return reply.status(404).send({ error: "NOT_FOUND", message: "Not found" });
+    }
+  };
+  app.get("/v1/platform/tenants", { preHandler: platform }, async () => {
+    const r = await platformDb!.query(
+      `SELECT t.id, t.name, t.country, t.plan, t.status, t.trial_ends_at, t.created_at, c.industry,
+              (SELECT count(*)::int FROM users u WHERE u.tenant_id=t.id) AS users,
+              (SELECT count(*)::int FROM sales_invoices i WHERE i.tenant_id=t.id AND i.issued_at > now() - interval '30 days') AS invoices_30d,
+              p.price_monthly
+         FROM tenants t JOIN plans p ON p.code=t.plan LEFT JOIN companies c ON c.tenant_id=t.id
+        ORDER BY t.created_at DESC`,
+    );
+    const mrr = r.rows.filter((x) => x.status === "active").reduce((s, x) => s.add(x.price_monthly), Money.zero());
+    return {
+      tenants: r.rows.length,
+      payingTenants: r.rows.filter((x) => Number(x.price_monthly) > 0 && x.status === "active").length,
+      onTrial: r.rows.filter((x) => x.trial_ends_at && new Date(x.trial_ends_at) > new Date()).length,
+      mrrSar: mrr.toFixed(2),
+      rows: r.rows,
+    };
+  });
+  app.post("/v1/platform/tenants/:id/plan", { preHandler: platform }, async (req) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
+    const b = z.object({ plan: z.enum(["free", "growth", "pro", "enterprise"]).optional(), status: z.enum(["active", "past_due", "suspended"]).optional(), endTrial: z.boolean().optional() }).parse(req.body);
+    const r = await platformDb!.query(
+      `UPDATE tenants SET plan = coalesce($2, plan), status = coalesce($3, status),
+              trial_ends_at = CASE WHEN $4 THEN now() ELSE trial_ends_at END
+        WHERE id=$1 RETURNING id, plan, status, trial_ends_at`,
+      [id, b.plan ?? null, b.status ?? null, b.endTrial ?? false],
+    );
+    if (!r.rowCount) throw new BusinessError("Tenant not found");
+    return r.rows[0];
+  });
+
   // ───── Users (owner manages staff) ─────
   app.post("/v1/users", { preHandler: auth("owner") }, async (req, reply) => {
     const u = z
@@ -158,6 +219,8 @@ export function buildApp(db: Db, config: Config): FastifyInstance {
     if (exists.rowCount) throw new BusinessError("البريد الإلكتروني مسجل بالفعل");
     const hash = await bcrypt.hash(u.password, 10);
     const row = await T(req, async (tx) => {
+      await requireCapacity(tx, "users");
+      if (u.role === "sales_rep") await requireModule(tx, "van_sales");
       const r = await tx.query<{ id: string }>(
         "INSERT INTO users (tenant_id, email, password_hash, full_name, role) VALUES ($1,$2,$3,$4,$5) RETURNING id",
         [req.user.tid, u.email.toLowerCase(), hash, u.fullName, u.role],
@@ -184,6 +247,7 @@ export function buildApp(db: Db, config: Config): FastifyInstance {
   app.post("/v1/items", { preHandler: auth("owner", "storekeeper") }, async (req, reply) => {
     const i = schemas.item.parse(req.body);
     const row = await T(req, async (tx) => {
+      if (i.trackBatches) await requireModule(tx, "pharmacy");
       const company = await tx.query<{ vat_percent: string }>("SELECT vat_percent FROM companies LIMIT 1");
       const r = await tx.query(
         `INSERT INTO items (tenant_id, sku, barcode, name_ar, name_en, category, price, tax_percent, track_stock, track_batches, reorder_level, unit)
@@ -201,7 +265,7 @@ export function buildApp(db: Db, config: Config): FastifyInstance {
   app.put("/v1/items/:id/recipe", { preHandler: auth("owner") }, async (req) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     const b = z.object({ lines: z.array(z.object({ ingredientId: z.string().uuid(), quantity: qty })).max(50) }).parse(req.body);
-    return T(req, async (tx) => {
+    return TM(req, "recipes", async (tx) => {
       const item = await maybeOne<{ track_stock: boolean }>(tx, "SELECT track_stock FROM items WHERE id=$1", [id]);
       if (!item) throw new BusinessError("الصنف غير موجود");
       if (item.track_stock) throw new BusinessError("الوصفة لأصناف المنيو فقط (أصناف لا يُتابع مخزونها مباشرة)");
@@ -294,7 +358,7 @@ export function buildApp(db: Db, config: Config): FastifyInstance {
         lines: z.array(z.object({ itemId: z.string().uuid(), quantity: qty })).min(1),
       })
       .parse(req.body);
-    return reply.status(201).send(await T(req, (tx) => transferStock(tx, actorOf(req), b)));
+    return reply.status(201).send(await TM(req, "inventory", (tx) => transferStock(tx, actorOf(req), b)));
   });
 
   app.get("/v1/van/me", { preHandler: auth("sales_rep") }, async (req) =>
@@ -311,12 +375,12 @@ export function buildApp(db: Db, config: Config): FastifyInstance {
 
   app.get("/v1/van/route", { preHandler: auth("sales_rep", "owner") }, async (req) => {
     const q = z.object({ lat: z.coerce.number(), lng: z.coerce.number(), day: date.optional() }).parse(req.query);
-    return T(req, (tx) => todaysRoute(tx, { lat: q.lat, lng: q.lng }, q.day ? new Date(`${q.day}T12:00:00Z`) : new Date()));
+    return TM(req, "van_sales", (tx) => todaysRoute(tx, { lat: q.lat, lng: q.lng }, q.day ? new Date(`${q.day}T12:00:00Z`) : new Date()));
   });
 
   app.post("/v1/van/visits", { preHandler: auth("sales_rep") }, async (req, reply) => {
     const b = z.object({ customerId: z.string().uuid(), lat: z.number(), lng: z.number() }).parse(req.body);
-    return reply.status(201).send(await T(req, (tx) => checkIn(tx, actorOf(req), b)));
+    return reply.status(201).send(await TM(req, "van_sales", (tx) => checkIn(tx, actorOf(req), b)));
   });
 
   app.post("/v1/van/visits/:id/checkout", { preHandler: auth("sales_rep") }, async (req) => {
@@ -415,12 +479,12 @@ export function buildApp(db: Db, config: Config): FastifyInstance {
   // ───── AI assistant «ذهب» & insights ─────
   app.post("/v1/assistant/ask", { preHandler: auth("owner", "accountant") }, async (req) => {
     const { question } = z.object({ question: z.string().min(1).max(500) }).parse(req.body);
-    return T(req, (tx) => ask(tx, question));
+    return TM(req, "assistant", (tx) => ask(tx, question));
   });
 
   app.get("/v1/insights/cashiers", { preHandler: auth("owner") }, async (req) => {
     const { day } = z.object({ day: date.optional() }).parse(req.query);
-    return T(req, (tx) => cashierInsights(tx, day ?? today()));
+    return TM(req, "fraud_guard", (tx) => cashierInsights(tx, day ?? today()));
   });
 
   // ───── Compliance ─────

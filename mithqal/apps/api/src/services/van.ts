@@ -3,6 +3,7 @@ import { DEFAULT_GEOFENCE_METERS, distanceMeters, issue, planRoute, postCollecti
 import { BusinessError, maybeOne, one, type Tx } from "../db.js";
 import { audit, emit, postJournal, type Actor } from "./core.js";
 import { createTerminal } from "./onboarding.js";
+import { requireCapacity, requireModule } from "./licensing.js";
 
 /** Owner assigns a van (warehouse + POS terminal with its own e-invoice chain) to a sales rep. */
 export async function setupVan(tx: Tx, actor: Actor, input: { userId: string; vehiclePlate?: string }) {
@@ -10,6 +11,8 @@ export async function setupVan(tx: Tx, actor: Actor, input: { userId: string; ve
   if (!rep || rep.role !== "sales_rep") throw new BusinessError("المستخدم ليس مندوب مبيعات");
   const exists = await maybeOne(tx, "SELECT 1 FROM van_assignments WHERE user_id=$1", [input.userId]);
   if (exists) throw new BusinessError("هذا المندوب لديه سيارة بالفعل");
+  await requireModule(tx, "van_sales");
+  await requireCapacity(tx, "vans");
   const branch = await one<{ id: string }>(tx, "SELECT id FROM branches ORDER BY name LIMIT 1");
   const n = (await one<{ n: string }>(tx, "SELECT count(*) AS n FROM van_assignments")).n;
   const wh = await one<{ id: string }>(tx, "INSERT INTO warehouses (tenant_id, branch_id, name) VALUES ($1,$2,$3) RETURNING id", [

@@ -14,7 +14,7 @@ const config = loadConfig();
 await migrate(config.migrationUrl);
 const db = createPool(config.appUrl);
 const ownerDb = createPool(config.migrationUrl);
-const app = buildApp(db, config);
+const app = buildApp(db, config, ownerDb);
 
 const zatca =
   config.zatcaMode === "mock"

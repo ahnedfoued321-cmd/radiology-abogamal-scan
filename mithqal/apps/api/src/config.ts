@@ -7,6 +7,8 @@ export interface Config {
   port: number;
   /** "mock" accepts every e-invoice locally; "sandbox"/"production" call ZATCA. */
   zatcaMode: "mock" | "sandbox" | "simulation" | "production";
+  /** Shared secret for the platform-operator API (x-platform-key). Disabled when empty. */
+  platformKey: string;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -18,6 +20,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     jwtSecret: env.JWT_SECRET ?? "dev-only-secret-change-me-dev-only-secret",
     port: Number(env.PORT ?? 4000),
     zatcaMode: (env.ZATCA_MODE as Config["zatcaMode"]) ?? "mock",
+    platformKey: env.PLATFORM_KEY ?? "",
   };
   if (env.NODE_ENV === "production" && cfg.jwtSecret.startsWith("dev-only")) {
     throw new Error("JWT_SECRET must be set in production");
