@@ -9,7 +9,7 @@ import { Money } from "@mithqal/money";
 import { entitlements, PlanError, requireCapacity, requireModule, type Module } from "./services/licensing.js";
 import { BusinessError, maybeOne, withTenant, type Db } from "./db.js";
 import { audit, type Actor } from "./services/core.js";
-import { onboard } from "./services/onboarding.js";
+import { createTerminal, onboard } from "./services/onboarding.js";
 import { receiveGoods } from "./services/inventory.js";
 import { createSale, getInvoice, refundSale } from "./services/sales.js";
 import { dailySummary, expiringBatches, trialBalance, vatSummary } from "./services/reports.js";
@@ -427,6 +427,38 @@ export function buildApp(db: Db, config: Config, platformDb?: Db): FastifyInstan
     const userId = req.user.role === "sales_rep" ? req.user.sub : q.userId;
     if (!userId) throw new BusinessError("حدد المندوب");
     return T(req, (tx) => vanSettlement(tx, userId, q.day ?? today()));
+  });
+
+  // ───── Branches & terminals ─────
+  app.post("/v1/branches", { preHandler: auth("owner") }, async (req, reply) => {
+    const b = z.object({ name: z.string().min(2) }).parse(req.body);
+    const out = await T(req, async (tx) => {
+      await requireModule(tx, "multi_branch");
+      await requireCapacity(tx, "terminals");
+      const company = (await tx.query<{ id: string; country: string }>("SELECT id, country FROM companies LIMIT 1")).rows[0]!;
+      const br = (await tx.query<{ id: string }>("INSERT INTO branches (tenant_id, company_id, name) VALUES ($1,$2,$3) RETURNING id", [req.user.tid, company.id, b.name])).rows[0]!;
+      const whId = (await tx.query<{ id: string }>("INSERT INTO warehouses (tenant_id, branch_id, name) VALUES ($1,$2,$3) RETURNING id", [req.user.tid, br.id, `مستودع ${b.name}`])).rows[0]!.id;
+      const n = (await tx.query<{ n: number }>("SELECT count(*)::int AS n FROM pos_terminals WHERE prefix LIKE 'POS%'")).rows[0]!.n;
+      const terminalId = await createTerminal(tx, req.user.tid, br.id, whId, `كاشير ${b.name}`, `POS${n + 1}`, company.country === "EG" ? "" : undefined);
+      await audit(tx, actorOf(req), "branch.created", "branch", br.id, { name: b.name });
+      return { branchId: br.id, warehouseId: whId, terminalId };
+    });
+    return reply.status(201).send(out);
+  });
+
+  app.get("/v1/reports/branches", { preHandler: auth("owner", "accountant") }, async (req) => {
+    const { day } = z.object({ day: date.optional() }).parse(req.query);
+    return T(req, async (tx) =>
+      (await tx.query(
+        `SELECT b.id, b.name,
+                count(i.*) FILTER (WHERE i.doc_type='INVOICE') AS invoices,
+                coalesce(sum(CASE WHEN i.doc_type='CREDIT_NOTE' THEN -i.total_gross ELSE i.total_gross END),0) AS gross,
+                coalesce(sum(CASE WHEN i.doc_type='CREDIT_NOTE' THEN -(i.total_net - i.cost_of_goods) ELSE i.total_net - i.cost_of_goods END),0) AS gross_profit
+           FROM branches b LEFT JOIN sales_invoices i ON i.branch_id=b.id AND i.issued_at::date=$1
+          GROUP BY b.id, b.name ORDER BY gross DESC`,
+        [day ?? today()],
+      )).rows.map((r) => ({ ...r, invoices: Number(r.invoices), gross: Money.of(r.gross).toFixed(2), gross_profit: Money.of(r.gross_profit).toFixed(2) })),
+    );
   });
 
   // ───── Purchasing ─────

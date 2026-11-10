@@ -72,9 +72,19 @@ describe("plans & module licensing", () => {
   it("unlocks modules immediately on upgrade", async () => {
     await call("POST", `/v1/platform/tenants/${tenantId}/plan`, undefined, { plan: "growth" }, P);
     expect((await call("POST", "/v1/assistant/ask", token, { question: "كم بعنا؟" })).status).toBe(200);
+    expect((await call("POST", "/v1/branches", token, { name: "فرع" })).status).toBe(402); // multi-branch is Pro
     expect((await call("GET", "/v1/insights/cashiers", token)).status).toBe(402); // Fraud Guard is Pro
     await call("POST", `/v1/platform/tenants/${tenantId}/plan`, undefined, { plan: "pro" }, P);
     expect((await call("GET", "/v1/insights/cashiers", token)).status).toBe(200);
+  });
+
+  it("opens a new branch with its own warehouse and POS (Pro), compared in the branch report", async () => {
+    const r = await call("POST", "/v1/branches", token, { name: "فرع جدة" });
+    expect(r.status).toBe(201);
+    const me = await call("GET", "/v1/me", token);
+    expect(me.body.terminals.map((t: any) => t.prefix)).toEqual(["POS1", "POS2"]);
+    const rep = await call("GET", "/v1/reports/branches", token);
+    expect(rep.body.map((b: any) => b.name)).toContain("فرع جدة");
   });
 
   it("blocks module use for suspended accounts", async () => {
