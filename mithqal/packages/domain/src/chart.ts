@@ -29,6 +29,8 @@ export const SA_RETAIL_CHART: AccountTemplate[] = [
   { code: "21", nameAr: "الالتزامات المتداولة", nameEn: "Current liabilities", type: "LIABILITY", parentCode: "2", postable: false },
   { code: "2101", nameAr: "الموردون (ذمم دائنة)", nameEn: "Accounts payable", type: "LIABILITY", parentCode: "21", role: "ACCOUNTS_PAYABLE", postable: true },
   { code: "2110", nameAr: "ضريبة القيمة المضافة - مخرجات", nameEn: "VAT output", type: "LIABILITY", parentCode: "21", role: "VAT_OUTPUT", postable: true },
+  { code: "2120", nameAr: "رواتب مستحقة", nameEn: "Salaries payable", type: "LIABILITY", parentCode: "21", role: "SALARIES_PAYABLE", postable: true },
+  { code: "2130", nameAr: "التأمينات الاجتماعية مستحقة", nameEn: "Social insurance payable", type: "LIABILITY", parentCode: "21", role: "SOCIAL_INSURANCE_PAYABLE", postable: true },
   { code: "3", nameAr: "حقوق الملكية", nameEn: "Equity", type: "EQUITY", postable: false },
   { code: "3101", nameAr: "رأس المال", nameEn: "Capital", type: "EQUITY", parentCode: "3", postable: true },
   { code: "3190", nameAr: "أرصدة افتتاحية", nameEn: "Opening balance equity", type: "EQUITY", parentCode: "3", role: "OPENING_BALANCE_EQUITY", postable: true },
@@ -38,8 +40,9 @@ export const SA_RETAIL_CHART: AccountTemplate[] = [
   { code: "5", nameAr: "المصروفات", nameEn: "Expenses", type: "EXPENSE", postable: false },
   { code: "5101", nameAr: "تكلفة البضاعة المباعة", nameEn: "Cost of goods sold", type: "EXPENSE", parentCode: "5", role: "COST_OF_GOODS_SOLD", postable: true },
   { code: "5102", nameAr: "تسويات وهالك المخزون", nameEn: "Inventory adjustments & waste", type: "EXPENSE", parentCode: "5", role: "INVENTORY_ADJUSTMENT", postable: true },
-  { code: "5201", nameAr: "الرواتب والأجور", nameEn: "Salaries & wages", type: "EXPENSE", parentCode: "5", postable: true },
+  { code: "5201", nameAr: "الرواتب والأجور", nameEn: "Salaries & wages", type: "EXPENSE", parentCode: "5", role: "SALARIES_EXPENSE", postable: true },
   { code: "5202", nameAr: "الإيجار", nameEn: "Rent", type: "EXPENSE", parentCode: "5", postable: true },
+  { code: "5203", nameAr: "حصة المنشأة في التأمينات الاجتماعية", nameEn: "Employer social insurance", type: "EXPENSE", parentCode: "5", role: "SOCIAL_INSURANCE_EXPENSE", postable: true },
 ];
 
 export function validateChart(chart: AccountTemplate[]): void {

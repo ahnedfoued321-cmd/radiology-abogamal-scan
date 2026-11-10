@@ -14,6 +14,7 @@ import { receiveGoods } from "./services/inventory.js";
 import { createSale, getInvoice, refundSale } from "./services/sales.js";
 import { dailySummary, expiringBatches, trialBalance, vatSummary } from "./services/reports.js";
 import { ask, cashierInsights } from "./services/assistant.js";
+import { bankFile, createEmployee, expiringDocuments, payrollRun, runPayroll } from "./services/hr.js";
 import { askLlm, type LlmClient } from "./services/assistant-llm.js";
 import {
   approvePurchaseOrder, createPurchaseOrder, getPurchaseOrder, paySupplier, receivePurchaseOrder, reorderSuggestions, supplierBalance,
@@ -469,6 +470,45 @@ export function buildApp(db: Db, config: Config, platformDb?: Db, llm?: LlmClien
         [day ?? today()],
       )).rows.map((r) => ({ ...r, invoices: Number(r.invoices), gross: Money.of(r.gross).toFixed(2), gross_profit: Money.of(r.gross_profit).toFixed(2) })),
     );
+  });
+
+  // ───── HR & payroll ─────
+  app.post("/v1/hr/employees", { preHandler: auth("owner", "accountant") }, async (req, reply) => {
+    const e = z
+      .object({
+        fullName: z.string().min(2),
+        nationality: z.string().length(2),
+        nationalId: z.string().optional(),
+        iban: z.string().optional(),
+        hireDate: date,
+        basicSalary: money,
+        housing: money.optional(),
+        transport: money.optional(),
+        otherAllowances: money.optional(),
+        documents: z.array(z.object({ kind: z.enum(["IQAMA", "PASSPORT", "HEALTH_CERT", "DRIVING_LICENSE", "CONTRACT", "OTHER"]), number: z.string().optional(), expiryDate: date })).optional(),
+      })
+      .parse(req.body);
+    return reply.status(201).send(await TM(req, "hr", (tx) => createEmployee(tx, actorOf(req), e)));
+  });
+  app.get("/v1/hr/employees", { preHandler: auth("owner", "accountant") }, async (req) =>
+    TM(req, "hr", async (tx) => (await tx.query("SELECT id, full_name, nationality, hire_date, basic_salary, housing, transport, active FROM employees ORDER BY full_name")).rows),
+  );
+  app.post("/v1/hr/payroll", { preHandler: auth("owner", "accountant") }, async (req, reply) => {
+    const b = z.object({ period: z.string(), deductions: z.record(z.string().uuid(), money).optional() }).parse(req.body);
+    return reply.status(201).send(await TM(req, "hr", (tx) => runPayroll(tx, actorOf(req), b)));
+  });
+  app.get("/v1/hr/payroll/:period", { preHandler: auth("owner", "accountant") }, async (req) => {
+    const { period } = z.object({ period: z.string().regex(/^\d{4}-\d{2}$/) }).parse(req.params);
+    return TM(req, "hr", (tx) => payrollRun(tx, period));
+  });
+  app.get("/v1/hr/payroll/:period/bank-file", { preHandler: auth("owner", "accountant") }, async (req, reply) => {
+    const { period } = z.object({ period: z.string().regex(/^\d{4}-\d{2}$/) }).parse(req.params);
+    const csv = await TM(req, "hr", (tx) => bankFile(tx, period));
+    return reply.header("content-type", "text/csv; charset=utf-8").header("content-disposition", `attachment; filename="salaries-${period}.csv"`).send(csv);
+  });
+  app.get("/v1/hr/expiring-documents", { preHandler: auth("owner", "accountant") }, async (req) => {
+    const { days } = z.object({ days: z.coerce.number().int().min(1).max(365).default(60) }).parse(req.query);
+    return TM(req, "hr", (tx) => expiringDocuments(tx, today(), days));
   });
 
   // ───── Purchasing ─────

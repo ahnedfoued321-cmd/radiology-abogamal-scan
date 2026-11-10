@@ -14,7 +14,11 @@ export type AccountRole =
   | "SALES_DISCOUNTS"
   | "COST_OF_GOODS_SOLD"
   | "INVENTORY_ADJUSTMENT"
-  | "OPENING_BALANCE_EQUITY";
+  | "OPENING_BALANCE_EQUITY"
+  | "SALARIES_EXPENSE"
+  | "SALARIES_PAYABLE"
+  | "SOCIAL_INSURANCE_PAYABLE"
+  | "SOCIAL_INSURANCE_EXPENSE";
 
 export interface JournalLineDraft {
   role: AccountRole;

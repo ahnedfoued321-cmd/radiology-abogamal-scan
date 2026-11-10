@@ -2,7 +2,7 @@ import { one, type Tx } from "../db.js";
 
 export type Module =
   | "pos" | "inventory" | "accounting" | "einvoicing" | "recipes" | "pharmacy"
-  | "assistant" | "van_sales" | "fraud_guard" | "multi_branch" | "api";
+  | "assistant" | "van_sales" | "fraud_guard" | "multi_branch" | "api" | "hr";
 
 export class PlanError extends Error {
   statusCode = 402;
@@ -26,6 +26,7 @@ const MODULE_AR: Record<Module, string> = {
   pos: "نقطة البيع", inventory: "المخزون", accounting: "المحاسبة", einvoicing: "الفوترة الإلكترونية",
   recipes: "الوصفات وتكلفة الكوب", pharmacy: "الصيدليات (التشغيلات)", assistant: "المساعد «ذهب»",
   van_sales: "المناديب «خُطى»", fraud_guard: "كاشف التلاعب", multi_branch: "تعدد الفروع", api: "الربط البرمجي",
+  hr: "الموارد البشرية والرواتب",
 };
 
 /** During the trial a tenant gets the Pro plan; afterwards its paid plan (or Free). */
