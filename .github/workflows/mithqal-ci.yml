@@ -1,0 +1,37 @@
+name: Mithqal CI
+on:
+  push:
+    paths: ["mithqal/**", ".github/workflows/mithqal-ci.yml"]
+  pull_request:
+    paths: ["mithqal/**", ".github/workflows/mithqal-ci.yml"]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mithqal
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: mithqal
+          POSTGRES_PASSWORD: mithqal
+          POSTGRES_DB: mithqal_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U mithqal" --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: mithqal/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -r --filter "./packages/*" build
+      - run: pnpm -r typecheck
+      - run: pnpm test
+      - run: pnpm --filter @mithqal/web build

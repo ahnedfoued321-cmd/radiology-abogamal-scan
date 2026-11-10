@@ -1,0 +1,17 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: mithqal
+      POSTGRES_PASSWORD: mithqal
+      POSTGRES_DB: mithqal
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/init-test-db.sql:/docker-entrypoint-initdb.d/10-test-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mithqal"]
+      interval: 5s
+      retries: 10
+volumes:
+  pgdata:
