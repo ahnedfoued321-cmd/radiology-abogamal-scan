@@ -52,7 +52,10 @@ export const session = {
     store()?.setItem(TOKEN_KEY, token);
   },
   clear() {
-    store()?.removeItem(TOKEN_KEY);
+    const s = store();
+    s?.removeItem(TOKEN_KEY);
+    // drop last-known account data so the next user on this device never sees it
+    for (const k of ["me", "items"]) s?.removeItem(`mithqal.cache.${k}`);
   },
 };
 
@@ -111,4 +114,37 @@ export async function flushOutbox(): Promise<{ sent: number; failed: number }> {
   }
   saveOutbox(remaining);
   return { sent, failed: remaining.length };
+}
+
+/* ─────────── Last-known data for offline start ─────────── */
+
+export function cacheSet(key: string, value: unknown) {
+  try {
+    store()?.setItem(`mithqal.cache.${key}`, JSON.stringify(value));
+  } catch {
+    /* ignore */
+  }
+}
+
+export function cacheGet<T>(key: string): T | null {
+  try {
+    const v = store()?.getItem(`mithqal.cache.${key}`);
+    return v ? (JSON.parse(v) as T) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** GET with fallback to the last successful response when the network is down (never on 401/403). */
+export async function apiCached<T>(path: string, key: string): Promise<T> {
+  try {
+    const v = await api<T>("GET", path);
+    cacheSet(key, v);
+    return v;
+  } catch (e) {
+    if (e instanceof ApiError) throw e;
+    const hit = cacheGet<T>(key);
+    if (hit) return hit;
+    throw e;
+  }
 }

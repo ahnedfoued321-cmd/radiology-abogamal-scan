@@ -70,6 +70,12 @@ describe("onboarding & auth", () => {
     expect((await call("POST", "/v1/auth/login", undefined, { email: cafe.owner.email, password: "nope" })).status).toBe(401);
   });
 
+  it("throttles repeated failed logins", async () => {
+    for (let i = 0; i < 5; i++) await call("POST", "/v1/auth/login", undefined, { email: "victim@cafe.test", password: "guess" + i });
+    const r = await call("POST", "/v1/auth/login", undefined, { email: "victim@cafe.test", password: "guess" });
+    expect(r.status).toBe(429);
+  });
+
   it("requires authentication", async () => {
     expect((await call("GET", "/v1/items")).status).toBe(401);
   });

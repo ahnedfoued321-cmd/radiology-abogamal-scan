@@ -1,0 +1,11 @@
+{
+  "name": "مِثقال — نقطة البيع",
+  "short_name": "مِثقال",
+  "lang": "ar",
+  "dir": "rtl",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#faf7f0",
+  "theme_color": "#1f3a2e",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}

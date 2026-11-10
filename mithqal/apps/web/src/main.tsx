@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import QRCode from "qrcode";
 import { priceDocument } from "@mithqal/domain";
 import { Money } from "@mithqal/money";
-import { api, enqueue, flushOutbox, outbox, session, type Item, type Me, type SalePayload } from "./api";
+import { api, apiCached, ApiError, enqueue, flushOutbox, outbox, session, type Item, type Me, type SalePayload } from "./api";
 import { VanApp } from "./van";
 import "./styles.css";
 
@@ -445,12 +445,16 @@ function App() {
     setTimeout(() => setMsg(""), 3500);
   }, []);
   const loadItems = useCallback(() => {
-    api<Item[]>("GET", "/v1/items").then(setItems).catch(() => undefined);
+    apiCached<Item[]>("/v1/items", "items").then(setItems).catch(() => undefined);
   }, []);
 
   useEffect(() => {
     if (!authed) return;
-    api<Me>("GET", "/v1/me").then(setMe).catch(() => setAuthed(false));
+    apiCached<Me>("/v1/me", "me")
+      .then(setMe)
+      .catch((e) => {
+        if (e instanceof ApiError && e.status === 401) setAuthed(false);
+      });
     loadItems();
   }, [authed, loadItems]);
 
@@ -500,6 +504,10 @@ function App() {
       {msg && <div className="toast">{msg}</div>}
     </div>
   );
+}
+
+if ("serviceWorker" in navigator && import.meta.env.PROD) {
+  window.addEventListener("load", () => navigator.serviceWorker.register("/sw.js").catch(() => undefined));
 }
 
 createRoot(document.getElementById("root")!).render(<React.StrictMode><App /></React.StrictMode>);

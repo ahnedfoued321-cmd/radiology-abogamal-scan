@@ -1,6 +1,7 @@
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import cors from "@fastify/cors";
 import jwt from "@fastify/jwt";
+import { timingSafeEqual } from "node:crypto";
 import bcrypt from "bcryptjs";
 import { z, ZodError } from "zod";
 import type { Config } from "./config.js";
@@ -134,14 +135,25 @@ export function buildApp(db: Db, config: Config, platformDb?: Db): FastifyInstan
     return reply.status(201).send({ ...r, token });
   });
 
+  const failures = new Map<string, { count: number; until: number }>();
   app.post("/v1/auth/login", async (req, reply) => {
     const { email, password } = schemas.login.parse(req.body);
+    const key = `${email.toLowerCase()}|${req.ip}`;
+    const f = failures.get(key);
+    if (f && f.count >= 5 && f.until > Date.now()) {
+      return reply.status(429).send({ error: "TOO_MANY_ATTEMPTS", message: "محاولات كثيرة — حاول بعد 15 دقيقة" });
+    }
     const u = await maybeOne<{ user_id: string; tenant_id: string; password_hash: string; role: Role; full_name: string }>(
       db, "SELECT * FROM auth_lookup($1)", [email.toLowerCase()],
     );
     if (!u || !(await bcrypt.compare(password, u.password_hash))) {
+      const prev = failures.get(key);
+      const count = prev && prev.until > Date.now() ? prev.count + 1 : 1;
+      if (failures.size > 10_000) for (const [k, v] of failures) if (v.until < Date.now()) failures.delete(k);
+      failures.set(key, { count, until: Date.now() + 15 * 60_000 });
       return reply.status(401).send({ error: "UNAUTHORIZED", message: "بيانات الدخول غير صحيحة" });
     }
+    failures.delete(key);
     return { token: app.jwt.sign({ sub: u.user_id, tid: u.tenant_id, role: u.role }), user: { id: u.user_id, fullName: u.full_name, role: u.role } };
   });
 
@@ -170,7 +182,10 @@ export function buildApp(db: Db, config: Config, platformDb?: Db): FastifyInstan
   // ───── Platform admin (Mithqal operator only) ─────
   const platform = async (req: FastifyRequest, reply: FastifyReply) => {
     const key = req.headers["x-platform-key"];
-    if (!platformDb || !config.platformKey || key !== config.platformKey) {
+    const ok =
+      typeof key === "string" && config.platformKey.length > 0 && key.length === config.platformKey.length &&
+      timingSafeEqual(Buffer.from(key), Buffer.from(config.platformKey));
+    if (!platformDb || !ok) {
       return reply.status(404).send({ error: "NOT_FOUND", message: "Not found" });
     }
   };
