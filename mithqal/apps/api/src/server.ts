@@ -1,3 +1,4 @@
+import Anthropic from "@anthropic-ai/sdk";
 import { buildApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { createPool } from "./db.js";
@@ -14,7 +15,9 @@ const config = loadConfig();
 await migrate(config.migrationUrl);
 const db = createPool(config.appUrl);
 const ownerDb = createPool(config.migrationUrl);
-const app = buildApp(db, config, ownerDb);
+// «ذهب» v2: enabled when Anthropic credentials are configured (ANTHROPIC_API_KEY or an `ant auth` profile + ASSISTANT_LLM=on).
+const llm = process.env.ANTHROPIC_API_KEY || process.env.ASSISTANT_LLM === "on" ? new Anthropic() : undefined;
+const app = buildApp(db, config, ownerDb, llm);
 
 const zatca = new RoutingClient({
   ZATCA:

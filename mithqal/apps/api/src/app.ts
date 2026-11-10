@@ -14,6 +14,7 @@ import { receiveGoods } from "./services/inventory.js";
 import { createSale, getInvoice, refundSale } from "./services/sales.js";
 import { dailySummary, expiringBatches, trialBalance, vatSummary } from "./services/reports.js";
 import { ask, cashierInsights } from "./services/assistant.js";
+import { askLlm, type LlmClient } from "./services/assistant-llm.js";
 import {
   approvePurchaseOrder, createPurchaseOrder, getPurchaseOrder, paySupplier, receivePurchaseOrder, reorderSuggestions, supplierBalance,
 } from "./services/purchasing.js";
@@ -88,7 +89,7 @@ const schemas = {
   period: z.object({ from: date, to: date }),
 };
 
-export function buildApp(db: Db, config: Config, platformDb?: Db): FastifyInstance {
+export function buildApp(db: Db, config: Config, platformDb?: Db, llm?: LlmClient): FastifyInstance {
   const app = Fastify({ logger: process.env.NODE_ENV !== "test" });
   app.register(cors, { origin: true });
   app.register(jwt, { secret: config.jwtSecret, sign: { expiresIn: "12h" } });
@@ -611,7 +612,17 @@ export function buildApp(db: Db, config: Config, platformDb?: Db): FastifyInstan
   // ───── AI assistant «ذهب» & insights ─────
   app.post("/v1/assistant/ask", { preHandler: auth("owner", "accountant") }, async (req) => {
     const { question } = z.object({ question: z.string().min(1).max(500) }).parse(req.body);
-    return TM(req, "assistant", (tx) => ask(tx, question));
+    return TM(req, "assistant", async (tx) => {
+      if (llm) {
+        try {
+          const r = await askLlm(llm, tx, question);
+          if (r) return { intent: "LLM", answer: r.answer, toolsUsed: r.toolsUsed, engine: "llm" };
+        } catch (e) {
+          app.log.warn({ err: (e as Error).message }, "assistant LLM failed; falling back to rules");
+        }
+      }
+      return { ...(await ask(tx, question)), engine: "rules" };
+    });
   });
 
   app.get("/v1/insights/cashiers", { preHandler: auth("owner") }, async (req) => {
