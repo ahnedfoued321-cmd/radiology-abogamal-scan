@@ -6,6 +6,7 @@ import { Money } from "@mithqal/money";
 import { api, apiCached, ApiError, enqueue, flushOutbox, outbox, session, type Item, type Me, type SalePayload } from "./api";
 import { VanApp } from "./van";
 import { Admin } from "./admin";
+import { Kitchen } from "./kitchen";
 import "./styles.css";
 
 const fmt = (v: string | Money, currency = "SAR") =>
@@ -436,7 +437,7 @@ function App() {
   const [authed, setAuthed] = useState(Boolean(session.token));
   const [me, setMe] = useState<Me | null>(null);
   const [items, setItems] = useState<Item[]>([]);
-  const [tab, setTab] = useState<"pos" | "dash" | "items" | "admin">("pos");
+  const [tab, setTab] = useState<"pos" | "dash" | "items" | "admin" | "kds">("pos");
   const [msg, setMsg] = useState("");
   const [pending, setPending] = useState(outbox().length);
   const online = useOnline();
@@ -492,7 +493,10 @@ function App() {
           <button className={`tab ${tab === "pos" ? "active" : ""}`} onClick={() => setTab("pos")}>{me.user.role === "sales_rep" ? "خُطى — المندوب" : "نقطة البيع"}</button>
           {isManager && <button className={`tab ${tab === "dash" ? "active" : ""}`} onClick={() => setTab("dash")}>لوحة اليوم</button>}
           {!["cashier", "sales_rep"].includes(me.user.role) && <button className={`tab ${tab === "items" ? "active" : ""}`} onClick={() => setTab("items")}>الأصناف والمخزون</button>}
-                  {me.user.role === "owner" && <button className={`tab ${tab === "admin" ? "active" : ""}`} onClick={() => setTab("admin")}>الإدارة</button>}
+                  {["cafe", "restaurant"].includes(me.company.industry) && ["owner", "cashier"].includes(me.user.role) && (
+            <button className={`tab ${tab === "kds" ? "active" : ""}`} onClick={() => setTab("kds")}>شاشة التحضير</button>
+          )}
+          {me.user.role === "owner" && <button className={`tab ${tab === "admin" ? "active" : ""}`} onClick={() => setTab("admin")}>الإدارة</button>}
         </nav>
         <div className="spacer" />
         <span className="company" style={{ color: "#d7e2dc" }}>{me.company.name_ar}</span>
@@ -504,6 +508,7 @@ function App() {
       {tab === "dash" && <Dashboard me={me} />}
       {tab === "items" && <Items me={me} items={items} reload={loadItems} toast={toast} />}
       {tab === "admin" && <Admin me={me} toast={toast} />}
+      {tab === "kds" && <Kitchen toast={toast} />}
       {msg && <div className="toast">{msg}</div>}
     </div>
   );
