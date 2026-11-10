@@ -5,6 +5,10 @@
 
 > «كل مثقال في شغلك… محسوب.»
 
+| خُطى: مسار المندوب | زيارة وبيع من السيارة | تسوية آخر اليوم |
+|---|---|---|
+| ![Route](docs/screenshots/van-route.png) | ![Visit](docs/screenshots/van-visit.png) | ![Settlement](docs/screenshots/van-settlement.png) |
+
 | نقطة البيع | إيصال ZATCA | لوحة المالك | الجوال |
 |---|---|---|---|
 | ![POS](docs/screenshots/pos.png) | ![Receipt](docs/screenshots/receipt-zatca-qr.png) | ![Dashboard](docs/screenshots/owner-dashboard.png) | ![Mobile](docs/screenshots/mobile.png) |
@@ -52,7 +56,8 @@ pnpm --filter @mithqal/api seed:demo
 
 # 5) الواجهة
 pnpm dev:web                     # http://localhost:5173
-# الدخول: demo@mithqal.app / Mithqal#2026
+# المالك: demo@mithqal.app / Mithqal#2026
+# المندوب: rep@mithqal.app / Mithqal#2026 (افتحها من الجوال)
 ```
 
 الاختبارات: `pnpm test`. اختبارات الـ API محتاجة قاعدة `mithqal_test` (اسمها بيتغير بـ `TEST_DB_NAME`).
@@ -123,7 +128,7 @@ mithqal/
 
 ## الخطوات التالية (Roadmap)
 
-1. **تطبيق المندوب (React Native)** فوق الـ API الحالي: خريطة، ومسار، وطباعة بلوتوث، و Offline.
+1. **تطبيق المندوب الأصلي (React Native)**: نسخة الويب «خُطى» شغالة دلوقتي. الخطوة الجاية خريطة داخلية، وطباعة بلوتوث، و Offline كامل للزيارات.
 2. حزمة الكافيهات المتقدمة: Modifiers، وشاشة المطبخ (KDS)، وطاولات.
 3. الصيدليات: دليل أدوية وبدائل، وروشتات، وتأمين، وتكامل «رصد».
 4. «ذهب» v2: طبقة LLM فوق الـ intents الحالية، وواتساب، وتوقع السيولة.

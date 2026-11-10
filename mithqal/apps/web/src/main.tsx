@@ -4,6 +4,7 @@ import QRCode from "qrcode";
 import { priceDocument } from "@mithqal/domain";
 import { Money } from "@mithqal/money";
 import { api, enqueue, flushOutbox, outbox, session, type Item, type Me, type SalePayload } from "./api";
+import { VanApp } from "./van";
 import "./styles.css";
 
 const fmt = (v: string | Money, currency = "SAR") =>
@@ -475,9 +476,9 @@ function App() {
       <header className="topbar">
         <div className="brand"><span className="brand-mark">م</span>مِثقال</div>
         <nav className="tabs">
-          <button className={`tab ${tab === "pos" ? "active" : ""}`} onClick={() => setTab("pos")}>نقطة البيع</button>
+          <button className={`tab ${tab === "pos" ? "active" : ""}`} onClick={() => setTab("pos")}>{me.user.role === "sales_rep" ? "خُطى — المندوب" : "نقطة البيع"}</button>
           {isManager && <button className={`tab ${tab === "dash" ? "active" : ""}`} onClick={() => setTab("dash")}>لوحة اليوم</button>}
-          {me.user.role !== "cashier" && <button className={`tab ${tab === "items" ? "active" : ""}`} onClick={() => setTab("items")}>الأصناف والمخزون</button>}
+          {!["cashier", "sales_rep"].includes(me.user.role) && <button className={`tab ${tab === "items" ? "active" : ""}`} onClick={() => setTab("items")}>الأصناف والمخزون</button>}
         </nav>
         <div className="spacer" />
         <span className="company" style={{ color: "#d7e2dc" }}>{me.company.name_ar}</span>
@@ -485,7 +486,7 @@ function App() {
         {pending > 0 && <span className="pill offline">{pending} بانتظار المزامنة</span>}
         <button className="link" onClick={() => { session.clear(); setAuthed(false); setMe(null); }}>خروج</button>
       </header>
-      {tab === "pos" && <Pos me={me} items={items} reloadItems={loadItems} toast={toast} />}
+      {me.user.role === "sales_rep" ? <VanApp toast={toast} /> : tab === "pos" && <Pos me={me} items={items} reloadItems={loadItems} toast={toast} />}
       {tab === "dash" && <Dashboard me={me} />}
       {tab === "items" && <Items me={me} items={items} reload={loadItems} toast={toast} />}
       {msg && <div className="toast">{msg}</div>}

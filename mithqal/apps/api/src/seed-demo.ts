@@ -71,3 +71,22 @@ for (const [i, basket] of baskets.entries()) {
   });
 }
 console.log("Demo ready → login: demo@mithqal.app / Mithqal#2026");
+
+// ── Van sales demo: a rep with a loaded van and three customers on today's route ──
+const repUser = await call<{ id: string }>("POST", "/v1/users", signup.token, {
+  fullName: "سالم المندوب", email: "rep@mithqal.app", password: "Mithqal#2026", role: "sales_rep",
+});
+const vanAssigned = await call<{ warehouseId: string }>("POST", "/v1/van/assign", signup.token, { userId: repUser.id, vehiclePlate: "ر س ط 4821" });
+await call("POST", "/v1/inventory/transfers", signup.token, {
+  fromWarehouseId: signup.warehouseId, toWarehouseId: vanAssigned.warehouseId, reference: "تحميل الصباح",
+  lines: [{ itemId: ids.DAT, quantity: "20" }, { itemId: ids.SAU, quantity: "30" }, { itemId: ids.CRO, quantity: "15" }],
+});
+const dow = new Date().getUTCDay();
+const shops = [
+  { name: "سوبرماركت النخيل", vatNumber: "311111111111113", creditLimit: "2000.00", latitude: 24.7136, longitude: 46.6753,
+    address: { street: "شارع العليا", buildingNumber: "12", district: "العليا", city: "الرياض", postalCode: "12241" } },
+  { name: "بقالة الحي", latitude: 24.7300, longitude: 46.6900, creditLimit: "300.00" },
+  { name: "مقهى الزاوية", latitude: 24.6950, longitude: 46.6850 },
+];
+for (const s of shops) await call("POST", "/v1/customers", signup.token, { ...s, routeDay: dow });
+console.log("Van demo ready → rep login: rep@mithqal.app / Mithqal#2026");
