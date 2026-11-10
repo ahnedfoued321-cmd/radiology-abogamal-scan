@@ -14,6 +14,7 @@ import {
   postSaleReturn,
   priceDocument,
   receive,
+  suggestReorder,
   validateChart,
 } from "./index.js";
 
@@ -162,5 +163,13 @@ describe("chart of accounts", () => {
     for (const r of ["CASH", "BANK_CARD_CLEARING", "ACCOUNTS_RECEIVABLE", "INVENTORY", "VAT_OUTPUT", "VAT_INPUT", "SALES_REVENUE", "COST_OF_GOODS_SOLD", "ACCOUNTS_PAYABLE"]) {
       expect(roles).toContain(r);
     }
+  });
+});
+
+describe("smart reorder", () => {
+  it("covers demand plus safety stock, rounded up to pack size", () => {
+    // sold 70 in 14 days = 5/day; 14 days cover = 70 + safety 10 = 80; on hand 12 -> need 68 -> 6 cartons of 12 = 72
+    expect(suggestReorder({ onHand: 12, soldLastNDays: 70, days: 14, coverDays: 14, reorderLevel: 10, packSize: 12 }).toFixed(0)).toBe("72");
+    expect(suggestReorder({ onHand: 500, soldLastNDays: 70, days: 14, coverDays: 14, reorderLevel: 10 }).isZero()).toBe(true);
   });
 });

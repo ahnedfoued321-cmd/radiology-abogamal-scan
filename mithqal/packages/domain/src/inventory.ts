@@ -90,3 +90,24 @@ export function daysToExpiry(expiryDate: string, today: string): number {
   const ms = Date.parse(`${expiryDate}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`);
   return Math.round(ms / 86_400_000);
 }
+
+/**
+ * Smart reorder: order enough to cover `coverDays` of demand at the recent sales rate plus a
+ * safety stock (the reorder level), minus what is on hand. Rounded up to the pack size.
+ */
+export function suggestReorder(i: {
+  onHand: DecimalInput;
+  soldLastNDays: DecimalInput;
+  days: number;
+  coverDays: number;
+  reorderLevel: DecimalInput;
+  packSize?: number;
+}): Money {
+  const daily = Money.of(i.soldLastNDays).div(Math.max(1, i.days));
+  const target = daily.mul(i.coverDays).add(i.reorderLevel);
+  const need = target.sub(i.onHand);
+  if (!need.gt(0)) return Money.zero();
+  const pack = Math.max(1, i.packSize ?? 1);
+  const packs = Math.ceil(Number(need.div(pack).toFixed(6)));
+  return Money.of(packs * pack);
+}

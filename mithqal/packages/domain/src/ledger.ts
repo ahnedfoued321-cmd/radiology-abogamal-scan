@@ -150,3 +150,10 @@ export function postCollection(i: { reference: string; method: CollectionMethod;
   assertBalanced(j);
   return j;
 }
+
+/** Posting rule: supplier payment — Dr Accounts payable, Cr Cash / Bank. */
+export function postSupplierPayment(i: { reference: string; method: "CASH" | "BANK_TRANSFER" | "CHEQUE"; amount: DecimalInput }): JournalDraft {
+  const j = { memo: `Supplier payment ${i.reference}`, lines: [dr("ACCOUNTS_PAYABLE", i.amount), cr(i.method === "CASH" ? "CASH" : "BANK", i.amount)] };
+  assertBalanced(j);
+  return j;
+}

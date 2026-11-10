@@ -14,6 +14,9 @@ import { receiveGoods } from "./services/inventory.js";
 import { createSale, getInvoice, refundSale } from "./services/sales.js";
 import { dailySummary, expiringBatches, trialBalance, vatSummary } from "./services/reports.js";
 import { ask, cashierInsights } from "./services/assistant.js";
+import {
+  approvePurchaseOrder, createPurchaseOrder, getPurchaseOrder, paySupplier, receivePurchaseOrder, reorderSuggestions, supplierBalance,
+} from "./services/purchasing.js";
 import { checkIn, checkOut, collect, customerBalance, setupVan, todaysRoute, transferStock, vanOf, vanSettlement } from "./services/van.js";
 
 type Role = "owner" | "accountant" | "cashier" | "storekeeper" | "sales_rep";
@@ -424,6 +427,69 @@ export function buildApp(db: Db, config: Config, platformDb?: Db): FastifyInstan
     const userId = req.user.role === "sales_rep" ? req.user.sub : q.userId;
     if (!userId) throw new BusinessError("حدد المندوب");
     return T(req, (tx) => vanSettlement(tx, userId, q.day ?? today()));
+  });
+
+  // ───── Purchasing ─────
+  app.post("/v1/suppliers", { preHandler: auth("owner", "storekeeper", "accountant") }, async (req, reply) => {
+    const b = z.object({ name: z.string().min(1), phone: z.string().optional(), vatNumber: z.string().optional(), paymentTermsDays: z.number().int().min(0).max(365).default(30) }).parse(req.body);
+    const row = await T(req, async (tx) =>
+      (await tx.query("INSERT INTO suppliers (tenant_id, name, phone, vat_number, payment_terms_days) VALUES ($1,$2,$3,$4,$5) RETURNING *", [
+        req.user.tid, b.name, b.phone ?? null, b.vatNumber ?? null, b.paymentTermsDays,
+      ])).rows[0],
+    );
+    return reply.status(201).send(row);
+  });
+
+  app.get("/v1/suppliers", { preHandler: auth("owner", "storekeeper", "accountant") }, async (req) =>
+    T(req, async (tx) => {
+      const rows = (await tx.query("SELECT id, name, phone, vat_number, payment_terms_days FROM suppliers ORDER BY name")).rows;
+      return Promise.all(rows.map(async (r) => ({ ...r, balance: (await supplierBalance(tx, r.id)).toFixed(2) })));
+    }),
+  );
+
+  app.get("/v1/purchasing/suggestions", { preHandler: auth("owner", "storekeeper") }, async (req) => {
+    const { warehouseId } = z.object({ warehouseId: z.string().uuid() }).parse(req.query);
+    return T(req, (tx) => reorderSuggestions(tx, warehouseId));
+  });
+
+  app.post("/v1/purchasing/orders", { preHandler: auth("owner", "storekeeper") }, async (req, reply) => {
+    const b = z
+      .object({
+        supplierId: z.string().uuid(),
+        warehouseId: z.string().uuid(),
+        note: z.string().optional(),
+        lines: z.array(z.object({ itemId: z.string().uuid(), quantity: qty, unitCost: money })).min(1),
+      })
+      .parse(req.body);
+    return reply.status(201).send(await T(req, (tx) => createPurchaseOrder(tx, actorOf(req), b)));
+  });
+
+  app.get("/v1/purchasing/orders/:id", { preHandler: auth("owner", "storekeeper", "accountant") }, async (req) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
+    return T(req, (tx) => getPurchaseOrder(tx, id));
+  });
+
+  app.post("/v1/purchasing/orders/:id/approve", { preHandler: auth("owner") }, async (req) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
+    return T(req, (tx) => approvePurchaseOrder(tx, actorOf(req), id));
+  });
+
+  app.post("/v1/purchasing/orders/:id/receive", { preHandler: auth("owner", "storekeeper") }, async (req, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
+    const b = z
+      .object({
+        reference: z.string().min(1),
+        lines: z.array(z.object({ itemId: z.string().uuid(), quantity: qty, batchNo: z.string().optional(), expiryDate: date.optional() })).min(1),
+      })
+      .parse(req.body);
+    return reply.status(201).send(await T(req, (tx) => receivePurchaseOrder(tx, actorOf(req), id, b)));
+  });
+
+  app.post("/v1/suppliers/:id/payments", { preHandler: auth("owner", "accountant") }, async (req, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
+    const b = z.object({ clientUuid: z.string().uuid(), method: z.enum(["CASH", "BANK_TRANSFER", "CHEQUE"]), amount: money, reference: z.string().optional() }).parse(req.body);
+    const out = await T(req, (tx) => paySupplier(tx, actorOf(req), { supplierId: id, ...b }));
+    return reply.status(out.replayed ? 200 : 201).send(out);
   });
 
   // ───── Inventory ─────

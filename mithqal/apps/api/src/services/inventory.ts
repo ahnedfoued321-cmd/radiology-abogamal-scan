@@ -28,7 +28,7 @@ export interface ReceiptLine {
 export async function receiveGoods(
   tx: Tx,
   actor: Actor,
-  input: { warehouseId: string; reference: string; lines: ReceiptLine[]; paidCash?: boolean; date: string },
+  input: { warehouseId: string; reference: string; lines: ReceiptLine[]; paidCash?: boolean; date: string; supplierId?: string; poId?: string },
 ): Promise<{ receiptId: string; net: string; tax: string }> {
   const company = await one<{ vat_percent: string; currency: string }>(tx, "SELECT vat_percent, currency FROM companies LIMIT 1");
   const receiptId = crypto.randomUUID();
@@ -63,6 +63,11 @@ export async function receiveGoods(
     net = net.add(Money.of(l.quantity).mul(l.unitCost).roundTo(company.currency));
   }
   const tax = net.mul(Money.of(company.vat_percent).div(100)).roundTo(company.currency);
+  await tx.query(
+    `INSERT INTO goods_receipts (id, tenant_id, supplier_id, po_id, warehouse_id, reference, net, tax, paid_cash)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+    [receiptId, actor.tenantId, input.supplierId ?? null, input.poId ?? null, input.warehouseId, input.reference, net.toStorage(), tax.toStorage(), input.paidCash ?? false],
+  );
   await postJournal(tx, actor, postPurchase({ reference: input.reference, net, tax, paidCash: input.paidCash }), {
     type: "GOODS_RECEIPT", id: receiptId, date: input.date,
   });
