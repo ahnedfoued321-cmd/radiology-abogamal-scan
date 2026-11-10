@@ -13,7 +13,7 @@ import { audit, lockKey, type Actor } from "./services/core.js";
 import { createTerminal, onboard } from "./services/onboarding.js";
 import { receiveGoods } from "./services/inventory.js";
 import { createSale, getInvoice, refundSale } from "./services/sales.js";
-import { dailySummary, expiringBatches, trialBalance, vatSummary } from "./services/reports.js";
+import { accountStatement, balanceSheet, dailySummary, expiringBatches, incomeStatement, trialBalance, vatSummary } from "./services/reports.js";
 import { ask, cashierInsights } from "./services/assistant.js";
 import { bankFile, createEmployee, expiringDocuments, payrollRun, runPayroll } from "./services/hr.js";
 import { askLlm, type LlmClient } from "./services/assistant-llm.js";
@@ -659,6 +659,64 @@ export function buildApp(db: Db, config: Config, platformDb?: Db, llm?: LlmClien
     const p = schemas.period.parse(req.query);
     return T(req, (tx) => trialBalance(tx, p.from, p.to));
   });
+  app.get("/v1/reports/income-statement", { preHandler: auth("owner", "accountant") }, async (req) => {
+    const p = schemas.period.parse(req.query);
+    return T(req, (tx) => incomeStatement(tx, p.from, p.to));
+  });
+  app.get("/v1/reports/balance-sheet", { preHandler: auth("owner", "accountant") }, async (req) => {
+    const { asOf } = z.object({ asOf: date.optional() }).parse(req.query);
+    return T(req, (tx) => balanceSheet(tx, asOf ?? today()));
+  });
+  app.get("/v1/reports/account/:code", { preHandler: auth("owner", "accountant") }, async (req) => {
+    const { code } = z.object({ code: z.string().max(20) }).parse(req.params);
+    const p = schemas.period.parse(req.query);
+    const r = await T(req, (tx) => accountStatement(tx, code, p.from, p.to));
+    if (!r) throw new BusinessError("الحساب غير موجود");
+    return r;
+  });
+
+  // Manual journal entry (accountant): only postable accounts, must balance, posted immediately and immutable.
+  app.post("/v1/accounting/journals", { preHandler: auth("owner", "accountant") }, async (req, reply) => {
+    const b = z
+      .object({
+        date,
+        memo: z.string().min(3),
+        lines: z.array(z.object({ accountCode: z.string(), debit: money.default("0"), credit: money.default("0"), memo: z.string().optional() })).min(2).max(100),
+      })
+      .parse(req.body);
+    const out = await T(req, async (tx) => {
+      const codes = [...new Set(b.lines.map((l) => l.accountCode))];
+      const accs = await tx.query<{ id: string; code: string; postable: boolean; role: string | null }>("SELECT id, code, postable, role FROM accounts WHERE code = ANY($1)", [codes]);
+      const byCode = new Map(accs.rows.map((a) => [a.code, a]));
+      for (const c of codes) {
+        const a = byCode.get(c);
+        if (!a) throw new BusinessError(`الحساب ${c} غير موجود`);
+        if (!a.postable) throw new BusinessError(`الحساب ${c} حساب تجميعي ولا يقبل القيد`);
+        // control accounts move only through their sub-ledgers, so balances by item/customer/supplier always tie out
+        if (a.role === "INVENTORY") throw new BusinessError("حساب المخزون يتحرك من حركات المخزون فقط");
+        if (a.role === "ACCOUNTS_RECEIVABLE") throw new BusinessError("حساب العملاء يتحرك من الفواتير والتحصيلات فقط");
+        if (a.role === "ACCOUNTS_PAYABLE") throw new BusinessError("حساب الموردين يتحرك من الاستلامات والسداد فقط");
+      }
+      const d = Money.sum(b.lines.map((l) => l.debit)), c = Money.sum(b.lines.map((l) => l.credit));
+      if (!d.eq(c) || d.isZero()) throw new BusinessError(`القيد غير متوازن: مدين ${d.toFixed(2)} ≠ دائن ${c.toFixed(2)}`);
+      for (const l of b.lines) {
+        if (Money.of(l.debit).gt(0) === Money.of(l.credit).gt(0)) throw new BusinessError("كل سطر يجب أن يكون مدينًا أو دائنًا فقط");
+      }
+      const e = (await tx.query<{ id: string }>(
+        "INSERT INTO journal_entries (tenant_id, entry_date, memo, source_type, created_by) VALUES ($1,$2,$3,'MANUAL',$4) RETURNING id",
+        [req.user.tid, b.date, b.memo, req.user.sub],
+      )).rows[0]!;
+      for (const l of b.lines) {
+        await tx.query("INSERT INTO journal_lines (tenant_id, entry_id, account_id, debit, credit, memo) VALUES ($1,$2,$3,$4,$5,$6)", [
+          req.user.tid, e.id, byCode.get(l.accountCode)!.id, l.debit, l.credit, l.memo ?? null,
+        ]);
+      }
+      await audit(tx, actorOf(req), "journal.manual", "journal_entry", e.id, b);
+      return { entryId: e.id };
+    });
+    return reply.status(201).send(out);
+  });
+
   app.get("/v1/reports/vat", { preHandler: auth("owner", "accountant") }, async (req) => {
     const p = schemas.period.parse(req.query);
     return T(req, (tx) => vatSummary(tx, p.from, p.to));

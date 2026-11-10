@@ -115,3 +115,80 @@ export async function expiringBatches(tx: Tx, today: string, withinDays: number)
     suggestion: b.days < 0 ? "منتهي — اعزله وأرجعه للمورد" : b.days <= 30 ? "قارب على الانتهاء — عرض ترويجي أو إرجاع للمورد" : "انقله لفرع أسرع بيعًا أو ضعه في الواجهة",
   }));
 }
+
+/** Income statement (P&L) for a period from posted journals. */
+export async function incomeStatement(tx: Tx, from: string, to: string) {
+  const r = await tx.query<{ code: string; name_ar: string; type: string; debit: string; credit: string }>(
+    `SELECT a.code, a.name_ar, a.type, coalesce(sum(l.debit),0) AS debit, coalesce(sum(l.credit),0) AS credit
+       FROM accounts a JOIN journal_lines l ON l.account_id=a.id JOIN journal_entries e ON e.id=l.entry_id
+      WHERE a.type IN ('REVENUE','EXPENSE') AND e.entry_date BETWEEN $1 AND $2
+      GROUP BY a.code, a.name_ar, a.type ORDER BY a.code`,
+    [from, to],
+  );
+  const revenue = r.rows.filter((x) => x.type === "REVENUE").map((x) => ({ code: x.code, name: x.name_ar, amount: Money.of(x.credit).sub(x.debit) }));
+  const expenses = r.rows.filter((x) => x.type === "EXPENSE").map((x) => ({ code: x.code, name: x.name_ar, amount: Money.of(x.debit).sub(x.credit) }));
+  const totalRevenue = Money.sum(revenue.map((x) => x.amount));
+  const totalExpenses = Money.sum(expenses.map((x) => x.amount));
+  const fmt = (rows: { code: string; name: string; amount: Money }[]) => rows.map((x) => ({ ...x, amount: x.amount.toFixed(2) }));
+  return {
+    from, to,
+    revenue: fmt(revenue), totalRevenue: totalRevenue.toFixed(2),
+    expenses: fmt(expenses), totalExpenses: totalExpenses.toFixed(2),
+    netProfit: totalRevenue.sub(totalExpenses).toFixed(2),
+  };
+}
+
+/** Balance sheet as of a date; current-period earnings are shown inside equity so it always balances. */
+export async function balanceSheet(tx: Tx, asOf: string) {
+  const r = await tx.query<{ code: string; name_ar: string; type: string; debit: string; credit: string }>(
+    `SELECT a.code, a.name_ar, a.type, coalesce(sum(l.debit),0) AS debit, coalesce(sum(l.credit),0) AS credit
+       FROM accounts a JOIN journal_lines l ON l.account_id=a.id JOIN journal_entries e ON e.id=l.entry_id
+      WHERE e.entry_date <= $1 GROUP BY a.code, a.name_ar, a.type ORDER BY a.code`,
+    [asOf],
+  );
+  const side = (type: string, debitNature: boolean) =>
+    r.rows.filter((x) => x.type === type).map((x) => ({ code: x.code, name: x.name_ar, amount: debitNature ? Money.of(x.debit).sub(x.credit) : Money.of(x.credit).sub(x.debit) }));
+  const assets = side("ASSET", true), liabilities = side("LIABILITY", false), equity = side("EQUITY", false);
+  const earnings = Money.sum(side("REVENUE", false).map((x) => x.amount)).sub(Money.sum(side("EXPENSE", true).map((x) => x.amount)));
+  const totalAssets = Money.sum(assets.map((x) => x.amount));
+  const totalLiabilities = Money.sum(liabilities.map((x) => x.amount));
+  const totalEquity = Money.sum(equity.map((x) => x.amount)).add(earnings);
+  const fmt = (rows: { code: string; name: string; amount: Money }[]) => rows.map((x) => ({ ...x, amount: x.amount.toFixed(2) }));
+  return {
+    asOf,
+    assets: fmt(assets), totalAssets: totalAssets.toFixed(2),
+    liabilities: fmt(liabilities), totalLiabilities: totalLiabilities.toFixed(2),
+    equity: fmt(equity), retainedEarnings: earnings.toFixed(2), totalEquity: totalEquity.toFixed(2),
+    balanced: totalAssets.eq(totalLiabilities.add(totalEquity)),
+  };
+}
+
+/** General-ledger statement for one account with running balance. */
+export async function accountStatement(tx: Tx, code: string, from: string, to: string) {
+  const acc = await tx.query<{ id: string; name_ar: string; type: string }>("SELECT id, name_ar, type FROM accounts WHERE code=$1", [code]);
+  const a = acc.rows[0];
+  if (!a) return null;
+  const debitNature = a.type === "ASSET" || a.type === "EXPENSE";
+  const opening = await tx.query<{ d: string; c: string }>(
+    `SELECT coalesce(sum(l.debit),0) AS d, coalesce(sum(l.credit),0) AS c FROM journal_lines l JOIN journal_entries e ON e.id=l.entry_id
+      WHERE l.account_id=$1 AND e.entry_date < $2`,
+    [a.id, from],
+  );
+  const sign = (d: string, c: string) => (debitNature ? Money.of(d).sub(c) : Money.of(c).sub(d));
+  let bal = sign(opening.rows[0]!.d, opening.rows[0]!.c);
+  const openingBalance = bal.toFixed(2);
+  const rows = await tx.query<{ entry_date: string; memo: string; source_type: string; debit: string; credit: string }>(
+    `SELECT to_char(e.entry_date,'YYYY-MM-DD') AS entry_date, e.memo, e.source_type, l.debit, l.credit
+       FROM journal_lines l JOIN journal_entries e ON e.id=l.entry_id
+      WHERE l.account_id=$1 AND e.entry_date BETWEEN $2 AND $3 ORDER BY e.entry_date, e.created_at`,
+    [a.id, from, to],
+  );
+  return {
+    code, name: a.name_ar, from, to, openingBalance,
+    lines: rows.rows.map((x) => {
+      bal = bal.add(sign(x.debit, x.credit));
+      return { date: x.entry_date, memo: x.memo, source: x.source_type, debit: Money.of(x.debit).toFixed(2), credit: Money.of(x.credit).toFixed(2), balance: bal.toFixed(2) };
+    }),
+    closingBalance: bal.toFixed(2),
+  };
+}
