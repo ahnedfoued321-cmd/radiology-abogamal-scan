@@ -5,7 +5,7 @@ const n = (v: string | number) => Number(v).toLocaleString("ar-SA", { minimumFra
 const roleAr: Record<string, string> = { owner: "مالك", accountant: "محاسب", cashier: "كاشير", storekeeper: "أمين مخزن", sales_rep: "مندوب" };
 const statusAr: Record<string, string> = { DRAFT: "مسودة", APPROVED: "معتمد", PARTIAL: "استلام جزئي", RECEIVED: "مستلم", CANCELLED: "ملغي" };
 
-type Section = "subscription" | "team" | "customers" | "purchasing" | "menu";
+type Section = "subscription" | "team" | "customers" | "purchasing" | "menu" | "payroll";
 
 export function Admin({ me, toast }: { me: Me; toast: (s: string) => void }) {
   const [section, setSection] = useState<Section>("purchasing");
@@ -14,6 +14,7 @@ export function Admin({ me, toast }: { me: Me; toast: (s: string) => void }) {
     ["menu", "تكلفة المنيو"],
     ["customers", "العملاء والمستحقات"],
     ["team", "الفريق والمناديب"],
+    ["payroll", "الرواتب"],
     ["subscription", "الباقة"],
   ];
   return (
@@ -28,6 +29,7 @@ export function Admin({ me, toast }: { me: Me; toast: (s: string) => void }) {
       {section === "customers" && <Customers toast={toast} />}
       {section === "team" && <Team toast={toast} />}
       {section === "subscription" && <Subscription />}
+      {section === "payroll" && <Payroll toast={toast} />}
     </div>
   );
 }
@@ -300,6 +302,99 @@ function Subscription() {
             <div className="muted">{p.max_users} مستخدم · {p.max_terminals} نقطة بيع · {p.max_vans} مندوب</div>
           </div>
         ))}
+      </div>
+    </>
+  );
+}
+
+/* ───── Payroll ───── */
+
+interface Employee { id: string; full_name: string; nationality: string; basic_salary: string; housing: string; transport: string }
+interface PayrollRun { period: string; gross: string; employeeContrib: string; employerContrib: string; netPay: string; payslips: { full_name: string; gross: string; employee_contrib: string; net_pay: string }[] }
+interface ExpiringDoc { full_name: string; kind: string; expiry_date: string; days: number }
+const docAr: Record<string, string> = { IQAMA: "الإقامة", PASSPORT: "الجواز", HEALTH_CERT: "الشهادة الصحية", DRIVING_LICENSE: "رخصة القيادة", CONTRACT: "العقد", OTHER: "مستند" };
+
+function Payroll({ toast }: { toast: (s: string) => void }) {
+  const [emps, reload] = useLoad<Employee[]>("/v1/hr/employees");
+  const [docs] = useLoad<ExpiringDoc[]>("/v1/hr/expiring-documents?days=60");
+  const lastMonth = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth() - 1, 1)).toISOString().slice(0, 7);
+  const [period, setPeriod] = useState(lastMonth);
+  const [run, setRun] = useState<PayrollRun | null>(null);
+
+  async function add(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const form = e.currentTarget;
+    const f = new FormData(form);
+    const v = (k: string) => String(f.get(k) ?? "").trim();
+    try {
+      await api("POST", "/v1/hr/employees", {
+        fullName: v("name"), nationality: v("nat").toUpperCase(), hireDate: v("hire"), basicSalary: v("basic"),
+        housing: v("housing") || undefined, transport: v("transport") || undefined, iban: v("iban") || undefined,
+        documents: v("iqama") ? [{ kind: "IQAMA", expiryDate: v("iqama") }] : undefined,
+      });
+      form.reset();
+      reload();
+    } catch (err) { toast((err as Error).message); }
+  }
+  async function runPayroll() {
+    try {
+      setRun(await api<PayrollRun>("POST", "/v1/hr/payroll", { period }));
+      toast("تم تشغيل المسير وترحيل القيد");
+    } catch (err) {
+      try { setRun(await api<PayrollRun>("GET", `/v1/hr/payroll/${period}`)); } catch { /* none yet */ }
+      toast((err as Error).message);
+    }
+  }
+  async function download() {
+    const res = await fetch(`/v1/hr/payroll/${period}/bank-file`, { headers: { authorization: `Bearer ${localStorage.getItem("mithqal.token") ?? ""}` } });
+    if (!res.ok) return toast("لا يوجد مسير لهذا الشهر");
+    const url = URL.createObjectURL(await res.blob());
+    const a = document.createElement("a");
+    a.href = url; a.download = `salaries-${period}.csv`; a.click();
+    URL.revokeObjectURL(url);
+  }
+  return (
+    <>
+      {!!docs?.length && (
+        <div className="panel">
+          <h3>⚠️ مستندات تنتهي خلال ٦٠ يومًا</h3>
+          <table><tbody>{docs.map((d, i) => <tr key={i}><td>{d.full_name}</td><td>{docAr[d.kind] ?? d.kind}</td><td className={d.days < 15 ? "error" : ""}>{d.expiry_date} ({d.days.toLocaleString("ar-SA")} يوم)</td></tr>)}</tbody></table>
+        </div>
+      )}
+      <div className="panel">
+        <h3>مسير الرواتب</h3>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <input className="search" type="month" value={period} onChange={(e) => setPeriod(e.target.value)} style={{ maxWidth: 220 }} />
+          <button className="btn primary" onClick={runPayroll}>تشغيل المسير</button>
+          <button className="btn ghost" onClick={download}>ملف تحويل البنك</button>
+        </div>
+        {run && (
+          <>
+            <div className="kpis" style={{ marginTop: 12 }}>
+              <div className="kpi"><div className="label">إجمالي الرواتب</div><div className="value">{n(run.gross)}</div></div>
+              <div className="kpi"><div className="label">التأمينات (الموظف / المنشأة)</div><div className="value">{n(run.employeeContrib)} / {n(run.employerContrib)}</div></div>
+              <div className="kpi"><div className="label">صافي التحويل</div><div className="value">{n(run.netPay)}</div></div>
+            </div>
+            <table style={{ marginTop: 12 }}>
+              <thead><tr><th>الموظف</th><th>الإجمالي</th><th>حصة التأمينات</th><th>الصافي</th></tr></thead>
+              <tbody>{run.payslips.map((p) => <tr key={p.full_name}><td>{p.full_name}</td><td>{n(p.gross)}</td><td>{n(p.employee_contrib)}</td><td><strong>{n(p.net_pay)}</strong></td></tr>)}</tbody>
+            </table>
+          </>
+        )}
+      </div>
+      <div className="two">
+        <div className="panel">
+          <h3>الموظفون</h3>
+          <table><tbody>{emps?.map((e) => <tr key={e.id}><td>{e.full_name}</td><td>{e.nationality}</td><td>{n(Number(e.basic_salary) + Number(e.housing) + Number(e.transport))}</td></tr>)}</tbody></table>
+        </div>
+        <form className="panel form" onSubmit={add}>
+          <h3>موظف جديد</h3>
+          <div className="two"><label>الاسم<input name="name" required minLength={2} /></label><label>الجنسية (رمز الدولة)<input name="nat" required maxLength={2} placeholder="SA" /></label></div>
+          <div className="two"><label>تاريخ التعيين<input name="hire" type="date" required /></label><label>الراتب الأساسي<input name="basic" required inputMode="decimal" pattern="\d+(\.\d{1,2})?" /></label></div>
+          <div className="two"><label>بدل السكن<input name="housing" inputMode="decimal" /></label><label>بدل النقل<input name="transport" inputMode="decimal" /></label></div>
+          <div className="two"><label>الآيبان<input name="iban" /></label><label>انتهاء الإقامة<input name="iqama" type="date" /></label></div>
+          <button className="btn primary">إضافة</button>
+        </form>
       </div>
     </>
   );
