@@ -4,6 +4,7 @@ import { Money, type DecimalInput } from "@mithqal/money";
 export type AccountRole =
   | "CASH"
   | "BANK_CARD_CLEARING"
+  | "BANK"
   | "ACCOUNTS_RECEIVABLE"
   | "INVENTORY"
   | "ACCOUNTS_PAYABLE"
@@ -136,6 +137,16 @@ export function postPurchase(i: { reference: string; net: DecimalInput; tax: Dec
       cr(i.paidCash ? "CASH" : "ACCOUNTS_PAYABLE", gross),
     ],
   });
+  assertBalanced(j);
+  return j;
+}
+
+export type CollectionMethod = "CASH" | "CARD" | "BANK_TRANSFER" | "CHEQUE";
+
+/** Posting rule: customer collection — Dr Cash / Card clearing / Bank, Cr Accounts receivable. */
+export function postCollection(i: { reference: string; method: CollectionMethod; amount: DecimalInput }): JournalDraft {
+  const role: AccountRole = i.method === "CASH" ? "CASH" : i.method === "CARD" ? "BANK_CARD_CLEARING" : "BANK";
+  const j = { memo: `Collection ${i.reference}`, lines: [dr(role, i.amount), cr("ACCOUNTS_RECEIVABLE", i.amount)] };
   assertBalanced(j);
   return j;
 }

@@ -10,6 +10,7 @@ import { onboard } from "./services/onboarding.js";
 import { receiveGoods } from "./services/inventory.js";
 import { createSale, getInvoice, refundSale } from "./services/sales.js";
 import { dailySummary, expiringBatches, trialBalance, vatSummary } from "./services/reports.js";
+import { checkIn, checkOut, collect, customerBalance, setupVan, todaysRoute, transferStock, vanOf, vanSettlement } from "./services/van.js";
 
 type Role = "owner" | "accountant" | "cashier" | "storekeeper" | "sales_rep";
 
@@ -65,7 +66,17 @@ const schemas = {
     payments: z.array(z.object({ method: z.enum(["CASH", "CARD", "CREDIT"]), amount: money })).min(1),
   }),
   refund: z.object({ clientUuid: z.string().uuid(), reason: z.string().min(2), method: z.enum(["CASH", "CARD", "CREDIT"]).optional() }),
-  customer: z.object({ name: z.string().min(1), phone: z.string().optional(), vatNumber: z.string().optional() }),
+  customer: z.object({
+    name: z.string().min(1),
+    phone: z.string().optional(),
+    vatNumber: z.string().regex(/^3\d{13}3$/, "رقم ضريبي غير صحيح").optional(),
+    crNumber: z.string().optional(),
+    address: z.object({ street: z.string(), buildingNumber: z.string(), district: z.string(), city: z.string(), postalCode: z.string() }).optional(),
+    latitude: z.number().min(-90).max(90).optional(),
+    longitude: z.number().min(-180).max(180).optional(),
+    creditLimit: money.optional(),
+    routeDay: z.number().int().min(0).max(6).optional(),
+  }),
   period: z.object({ from: date, to: date }),
 };
 
@@ -186,10 +197,97 @@ export function buildApp(db: Db, config: Config): FastifyInstance {
   // ───── Customers ─────
   app.post("/v1/customers", { preHandler: auth() }, async (req, reply) => {
     const c = schemas.customer.parse(req.body);
-    const row = await T(req, async (tx) =>
-      (await tx.query("INSERT INTO customers (tenant_id, name, phone, vat_number) VALUES ($1,$2,$3,$4) RETURNING *", [req.user.tid, c.name, c.phone ?? null, c.vatNumber ?? null])).rows[0],
-    );
+    if (c.creditLimit && req.user.role !== "owner" && Number(c.creditLimit) > 0) {
+      throw new BusinessError("تحديد حد الائتمان من صلاحية المالك فقط");
+    }
+    const a = c.address;
+    const row = await T(req, async (tx) => {
+      const r = await tx.query(
+        `INSERT INTO customers (tenant_id, name, phone, vat_number, cr_number, street, building_number, district, city, postal_code, country,
+                                latitude, longitude, credit_limit, route_day)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'SA',$11,$12,$13,$14) RETURNING *`,
+        [req.user.tid, c.name, c.phone ?? null, c.vatNumber ?? null, c.crNumber ?? null, a?.street ?? null, a?.buildingNumber ?? null,
+          a?.district ?? null, a?.city ?? null, a?.postalCode ?? null, c.latitude ?? null, c.longitude ?? null, c.creditLimit ?? "0", c.routeDay ?? null],
+      );
+      await audit(tx, actorOf(req), "customer.created", "customer", r.rows[0].id, { name: c.name });
+      return r.rows[0];
+    });
     return reply.status(201).send(row);
+  });
+
+  app.get("/v1/customers", { preHandler: auth() }, async (req) =>
+    T(req, async (tx) => {
+      const rows = (await tx.query("SELECT id, name, phone, vat_number, credit_limit, latitude, longitude, route_day FROM customers ORDER BY name LIMIT 1000")).rows;
+      return Promise.all(rows.map(async (r) => ({ ...r, balance: (await customerBalance(tx, r.id)).toFixed(2) })));
+    }),
+  );
+
+  // ───── Van sales / field force ("Mithqal Khuta") ─────
+  app.post("/v1/van/assign", { preHandler: auth("owner") }, async (req, reply) => {
+    const b = z.object({ userId: z.string().uuid(), vehiclePlate: z.string().optional() }).parse(req.body);
+    return reply.status(201).send(await T(req, (tx) => setupVan(tx, actorOf(req), b)));
+  });
+
+  app.post("/v1/inventory/transfers", { preHandler: auth("owner", "storekeeper") }, async (req, reply) => {
+    const b = z
+      .object({
+        fromWarehouseId: z.string().uuid(),
+        toWarehouseId: z.string().uuid(),
+        reference: z.string().optional(),
+        lines: z.array(z.object({ itemId: z.string().uuid(), quantity: qty })).min(1),
+      })
+      .parse(req.body);
+    return reply.status(201).send(await T(req, (tx) => transferStock(tx, actorOf(req), b)));
+  });
+
+  app.get("/v1/van/me", { preHandler: auth("sales_rep") }, async (req) =>
+    T(req, async (tx) => {
+      const v = await vanOf(tx, req.user.sub);
+      const stock = await tx.query(
+        `SELECT i.id AS item_id, i.name_ar, i.price, b.quantity FROM stock_balances b JOIN items i ON i.id=b.item_id
+          WHERE b.warehouse_id=$1 AND b.quantity > 0 ORDER BY i.name_ar`,
+        [v.warehouse_id],
+      );
+      return { ...v, stock: stock.rows };
+    }),
+  );
+
+  app.get("/v1/van/route", { preHandler: auth("sales_rep", "owner") }, async (req) => {
+    const q = z.object({ lat: z.coerce.number(), lng: z.coerce.number(), day: date.optional() }).parse(req.query);
+    return T(req, (tx) => todaysRoute(tx, { lat: q.lat, lng: q.lng }, q.day ? new Date(`${q.day}T12:00:00Z`) : new Date()));
+  });
+
+  app.post("/v1/van/visits", { preHandler: auth("sales_rep") }, async (req, reply) => {
+    const b = z.object({ customerId: z.string().uuid(), lat: z.number(), lng: z.number() }).parse(req.body);
+    return reply.status(201).send(await T(req, (tx) => checkIn(tx, actorOf(req), b)));
+  });
+
+  app.post("/v1/van/visits/:id/checkout", { preHandler: auth("sales_rep") }, async (req) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
+    const b = z.object({ outcome: z.enum(["SOLD", "COLLECTED", "NO_ORDER", "CLOSED", "OTHER"]), note: z.string().optional() }).parse(req.body);
+    return T(req, (tx) => checkOut(tx, actorOf(req), { visitId: id, ...b }));
+  });
+
+  app.post("/v1/collections", { preHandler: auth("sales_rep", "owner", "accountant", "cashier") }, async (req, reply) => {
+    const b = z
+      .object({
+        clientUuid: z.string().uuid(),
+        customerId: z.string().uuid(),
+        method: z.enum(["CASH", "CARD", "BANK_TRANSFER", "CHEQUE"]),
+        amount: money,
+        reference: z.string().optional(),
+        visitId: z.string().uuid().optional(),
+      })
+      .parse(req.body);
+    const out = await T(req, (tx) => collect(tx, actorOf(req), b));
+    return reply.status(out.replayed ? 200 : 201).send(out);
+  });
+
+  app.get("/v1/van/settlement", { preHandler: auth("sales_rep", "owner") }, async (req) => {
+    const q = z.object({ userId: z.string().uuid().optional(), day: date.optional() }).parse(req.query);
+    const userId = req.user.role === "sales_rep" ? req.user.sub : q.userId;
+    if (!userId) throw new BusinessError("حدد المندوب");
+    return T(req, (tx) => vanSettlement(tx, userId, q.day ?? today()));
   });
 
   // ───── Inventory ─────

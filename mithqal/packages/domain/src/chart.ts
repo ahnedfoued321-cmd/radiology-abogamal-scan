@@ -21,7 +21,7 @@ export const SA_RETAIL_CHART: AccountTemplate[] = [
   { code: "11", nameAr: "الأصول المتداولة", nameEn: "Current assets", type: "ASSET", parentCode: "1", postable: false },
   { code: "1101", nameAr: "الصندوق", nameEn: "Cash on hand", type: "ASSET", parentCode: "11", role: "CASH", postable: true },
   { code: "1102", nameAr: "مدفوعات الشبكة (مدى/بطاقات) تحت التسوية", nameEn: "Card payments clearing", type: "ASSET", parentCode: "11", role: "BANK_CARD_CLEARING", postable: true },
-  { code: "1103", nameAr: "البنك", nameEn: "Bank", type: "ASSET", parentCode: "11", postable: true },
+  { code: "1103", nameAr: "البنك", nameEn: "Bank", type: "ASSET", parentCode: "11", role: "BANK", postable: true },
   { code: "1110", nameAr: "العملاء (ذمم مدينة)", nameEn: "Accounts receivable", type: "ASSET", parentCode: "11", role: "ACCOUNTS_RECEIVABLE", postable: true },
   { code: "1120", nameAr: "المخزون", nameEn: "Inventory", type: "ASSET", parentCode: "11", role: "INVENTORY", postable: true },
   { code: "1130", nameAr: "ضريبة القيمة المضافة - مدخلات", nameEn: "VAT input", type: "ASSET", parentCode: "11", role: "VAT_INPUT", postable: true },
