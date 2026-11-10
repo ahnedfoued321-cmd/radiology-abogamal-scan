@@ -90,3 +90,21 @@ const shops = [
 ];
 for (const s of shops) await call("POST", "/v1/customers", signup.token, { ...s, routeDay: dow });
 console.log("Van demo ready → rep login: rep@mithqal.app / Mithqal#2026");
+
+// ── Purchasing + recipes demo ──
+await call("POST", "/v1/suppliers", signup.token, { name: "مخابز الرياض الحديثة", phone: "0500000000", paymentTermsDays: 15 });
+const raw: Record<string, string> = {};
+for (const r of [
+  { sku: "RAW-BEANS", nameAr: "بن مختص (جرام)", unit: "g", qty: "5000", cost: "0.12" },
+  { sku: "RAW-MILK", nameAr: "حليب طازج (مل)", unit: "ml", qty: "20000", cost: "0.006" },
+  { sku: "RAW-CUP", nameAr: "كوب 12oz", unit: "pcs", qty: "1000", cost: "0.40" },
+]) {
+  const it = await call<{ id: string }>("POST", "/v1/items", signup.token, { sku: r.sku, nameAr: r.nameAr, category: "خامات", price: "0", unit: r.unit, reorderLevel: "0" });
+  raw[r.sku] = it.id;
+  await call("POST", "/v1/inventory/receipts", signup.token, { warehouseId: signup.warehouseId, reference: "خامات", lines: [{ itemId: it.id, quantity: r.qty, unitCost: r.cost }] });
+}
+const flatWhite = await call<{ id: string }>("POST", "/v1/items", signup.token, { sku: "FLW", nameAr: "فلات وايت", category: "قهوة مختصة", price: "18.00", trackStock: false });
+await call("PUT", `/v1/items/${flatWhite.id}/recipe`, signup.token, { lines: [{ ingredientId: raw["RAW-BEANS"], quantity: "18" }, { ingredientId: raw["RAW-MILK"], quantity: "150" }, { ingredientId: raw["RAW-CUP"], quantity: "1" }] });
+const cortado = await call<{ id: string }>("POST", "/v1/items", signup.token, { sku: "CRT", nameAr: "كورتادو", category: "قهوة مختصة", price: "9.00", trackStock: false });
+await call("PUT", `/v1/items/${cortado.id}/recipe`, signup.token, { lines: [{ ingredientId: raw["RAW-BEANS"], quantity: "18" }, { ingredientId: raw["RAW-MILK"], quantity: "60" }, { ingredientId: raw["RAW-CUP"], quantity: "1" }] });
+console.log("Purchasing & recipes demo ready");

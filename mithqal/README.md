@@ -5,6 +5,10 @@
 
 > «كل مثقال في شغلك… محسوب.»
 
+| إعادة الطلب الذكية | تكلفة المنيو | الباقة |
+|---|---|---|
+| ![Reorder](docs/screenshots/smart-reorder.png) | ![Menu costing](docs/screenshots/menu-costing.png) | ![Subscription](docs/screenshots/subscription.png) |
+
 | خُطى: مسار المندوب | زيارة وبيع من السيارة | تسوية آخر اليوم |
 |---|---|---|
 | ![Route](docs/screenshots/van-route.png) | ![Visit](docs/screenshots/van-visit.png) | ![Settlement](docs/screenshots/van-settlement.png) |

@@ -224,6 +224,15 @@ export function buildApp(db: Db, config: Config, platformDb?: Db): FastifyInstan
   });
 
   // ───── Users (owner manages staff) ─────
+  app.get("/v1/users", { preHandler: auth("owner") }, async (req) =>
+    T(req, async (tx) =>
+      (await tx.query(
+        `SELECT u.id, u.full_name, u.email, u.role, u.active, v.vehicle_plate, (v.user_id IS NOT NULL) AS has_van
+           FROM users u LEFT JOIN van_assignments v ON v.user_id = u.id ORDER BY u.created_at`,
+      )).rows,
+    ),
+  );
+
   app.post("/v1/users", { preHandler: auth("owner") }, async (req, reply) => {
     const u = z
       .object({
@@ -495,6 +504,16 @@ export function buildApp(db: Db, config: Config, platformDb?: Db): FastifyInstan
       .parse(req.body);
     return reply.status(201).send(await T(req, (tx) => createPurchaseOrder(tx, actorOf(req), b)));
   });
+
+  app.get("/v1/purchasing/orders", { preHandler: auth("owner", "storekeeper", "accountant") }, async (req) =>
+    T(req, async (tx) =>
+      (await tx.query(
+        `SELECT p.id, p.number, p.status, p.created_at, s.name AS supplier,
+                coalesce((SELECT sum(l.quantity*l.unit_cost) FROM purchase_order_lines l WHERE l.po_id=p.id),0) AS total_net
+           FROM purchase_orders p JOIN suppliers s ON s.id=p.supplier_id ORDER BY p.created_at DESC LIMIT 100`,
+      )).rows.map((r) => ({ ...r, total_net: Money.of(r.total_net).toFixed(2) })),
+    ),
+  );
 
   app.get("/v1/purchasing/orders/:id", { preHandler: auth("owner", "storekeeper", "accountant") }, async (req) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
