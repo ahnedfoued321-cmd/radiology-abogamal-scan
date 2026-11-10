@@ -18,7 +18,8 @@ export async function setupVan(tx: Tx, actor: Actor, input: { userId: string; ve
   const wh = await one<{ id: string }>(tx, "INSERT INTO warehouses (tenant_id, branch_id, name) VALUES ($1,$2,$3) RETURNING id", [
     actor.tenantId, branch.id, `سيارة ${rep.full_name}`,
   ]);
-  const terminalId = await createTerminal(tx, actor.tenantId, branch.id, wh.id, `جوال ${rep.full_name}`, `VAN${Number(n) + 1}`);
+  const country = (await one<{ country: string }>(tx, "SELECT country FROM companies LIMIT 1")).country;
+  const terminalId = await createTerminal(tx, actor.tenantId, branch.id, wh.id, `جوال ${rep.full_name}`, `VAN${Number(n) + 1}`, country === "EG" ? "" : undefined);
   await tx.query("INSERT INTO van_assignments (user_id, tenant_id, warehouse_id, terminal_id, vehicle_plate) VALUES ($1,$2,$3,$4,$5)", [
     input.userId, actor.tenantId, wh.id, terminalId, input.vehiclePlate ?? null,
   ]);

@@ -8,7 +8,7 @@ import { VanApp } from "./van";
 import "./styles.css";
 
 const fmt = (v: string | Money, currency = "SAR") =>
-  `${Number(typeof v === "string" ? v : v.toFixed(2)).toLocaleString("ar-SA", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency === "SAR" ? "ر.س" : currency}`;
+  `${Number(typeof v === "string" ? v : v.toFixed(2)).toLocaleString("ar-SA", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${({ SAR: "ر.س", EGP: "ج.م", AED: "د.إ", KWD: "د.ك", QAR: "ر.ق" } as Record<string, string>)[currency] ?? currency}`;
 
 function useOnline() {
   const [online, setOnline] = useState(typeof navigator === "undefined" ? true : navigator.onLine);
@@ -45,7 +45,7 @@ function Auth({ onDone }: { onDone: () => void }) {
       } else {
         const r = await api<{ token: string }>("POST", "/v1/onboarding", {
           businessNameAr: v("business"),
-          country: "SA",
+          country: v("country") || "SA",
           industry: v("industry"),
           vatNumber: v("vat") || undefined,
           crNumber: v("cr") || undefined,
@@ -69,7 +69,15 @@ function Auth({ onDone }: { onDone: () => void }) {
         <p className="muted" style={{ marginTop: 0 }}>كل مثقال في شغلك… محسوب.</p>
         {mode === "signup" && (
           <>
-            <label>اسم النشاط<input name="business" required placeholder="مثال: مقهى الريحان" /></label>
+            <div className="two">
+              <label>اسم النشاط<input name="business" required placeholder="مثال: مقهى الريحان" /></label>
+              <label>الدولة
+                <select name="country" defaultValue="SA">
+                  <option value="SA">🇸🇦 السعودية (ZATCA)</option>
+                  <option value="EG">🇪🇬 مصر (ETA)</option>
+                </select>
+              </label>
+            </div>
             <div className="two">
               <label>النشاط
                 <select name="industry" defaultValue="cafe">
@@ -83,7 +91,7 @@ function Auth({ onDone }: { onDone: () => void }) {
               <label>اسمك<input name="name" required /></label>
             </div>
             <div className="two">
-              <label>الرقم الضريبي (15 رقم)<input name="vat" inputMode="numeric" placeholder="3XXXXXXXXXXXXX3" /></label>
+              <label>الرقم الضريبي (السعودية 15 رقم · مصر 9 أرقام)<input name="vat" inputMode="numeric" /></label>
               <label>السجل التجاري<input name="cr" inputMode="numeric" /></label>
             </div>
             <div className="two">

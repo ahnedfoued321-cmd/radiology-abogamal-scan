@@ -1,10 +1,10 @@
 import { Money } from "@mithqal/money";
 import { postSale, postSaleReturn, priceDocument, type PaymentMethod } from "@mithqal/domain";
-import { issueInvoice, type UblLine } from "@mithqal/zatca";
 import { BusinessError, maybeOne, one, type Tx } from "../db.js";
 import { audit, emit, postJournal, type Actor } from "./core.js";
 import { issueForSale, returnToStock } from "./inventory.js";
 import { customerBalance } from "./van.js";
+import { issueEDocument, type CompanyRow, type EDocLine, type TerminalRow } from "./edoc.js";
 
 interface CustomerRow {
   id: string;
@@ -41,54 +41,6 @@ export interface SaleInput {
   customerId?: string;
   lines: { itemId: string; quantity: string; unitPrice?: string; discount?: string }[];
   payments: { method: PaymentMethod; amount: string }[];
-}
-
-interface CompanyRow {
-  name_ar: string;
-  vat_number: string | null;
-  cr_number: string | null;
-  street: string | null;
-  building_number: string | null;
-  district: string | null;
-  city: string | null;
-  postal_code: string | null;
-  country: string;
-  currency: string;
-  prices_include_tax: boolean;
-  allow_negative_stock: boolean;
-}
-
-interface TerminalRow {
-  id: string;
-  branch_id: string;
-  warehouse_id: string;
-  prefix: string;
-  invoice_seq: string;
-  icv: string;
-  last_hash: string;
-  private_key_pem: string;
-  public_key_pem: string;
-}
-
-const PAYMENT_MEANS: Record<PaymentMethod, string> = { CASH: "10", CARD: "48", CREDIT: "30" };
-
-function sellerOf(c: CompanyRow) {
-  if (!c.vat_number) throw new BusinessError("أضف الرقم الضريبي للمنشأة قبل إصدار الفواتير");
-  return {
-    name: c.name_ar,
-    vatNumber: c.vat_number,
-    crNumber: c.cr_number ?? undefined,
-    address: c.street
-      ? {
-          street: c.street,
-          buildingNumber: c.building_number ?? "",
-          district: c.district ?? "",
-          city: c.city ?? "",
-          postalCode: c.postal_code ?? "",
-          countryCode: c.country,
-        }
-      : undefined,
-  };
 }
 
 function splitTimestamp(iso: string) {
@@ -226,30 +178,15 @@ export async function createSale(tx: Tx, actor: Actor, input: SaleInput) {
   );
 
   const mainMethod = [...input.payments].sort((a, b) => (Money.of(b.amount).gt(a.amount) ? 1 : -1))[0]!.method;
-  const ublLines: UblLine[] = priced.lines.map((l) => ({
-    id: l.index, name: l.name, quantity: l.quantity.toString(), unitPrice: l.unitNet.toFixed(2),
-    lineNet: l.net.toFixed(2), taxPercent: l.taxPercent.toFixed(2), taxAmount: l.tax.toFixed(2), taxCategory: l.taxCategory,
-  }));
-  const signed = issueInvoice(
-    {
-      kind, documentType: "INVOICE", number, uuid: invoiceId, issueDate: ts.date, issueTime: ts.time, timestamp: ts.timestamp,
-      currency: company.currency, seller: sellerOf(company), buyer: customer ? buyerOf(customer) : undefined,
-      paymentMeansCode: PAYMENT_MEANS[mainMethod], lines: ublLines,
-      totals: {
-        lineExtension: priced.totalNet.toFixed(2), taxExclusive: priced.totalNet.toFixed(2), taxTotal: priced.totalTax.toFixed(2),
-        taxInclusive: priced.totalGross.toFixed(2), allowanceTotal: "0.00", payable: priced.totalGross.toFixed(2),
-      },
-    },
-    { icv: Number(terminal.icv), lastHash: terminal.last_hash },
-    { privateKeyPem: terminal.private_key_pem, publicKeyPem: terminal.public_key_pem },
-  );
-  await tx.query(
-    `INSERT INTO e_invoice_documents (tenant_id, invoice_id, terminal_id, authority, mode, icv, pih, hash, signature, qr, xml)
-     VALUES ($1,$2,$3,'ZATCA',$10,$4,$5,$6,$7,$8,$9)`,
-    [actor.tenantId, invoiceId, terminal.id, signed.icv, signed.pih, signed.hash, signed.signature, signed.qr, signed.xml,
-      kind === "STANDARD" ? "CLEARANCE" : "REPORTING"],
-  );
-  await tx.query("UPDATE pos_terminals SET invoice_seq=$1, icv=$2, last_hash=$3 WHERE id=$4", [seq, signed.nextChain.icv, signed.nextChain.lastHash, terminal.id]);
+  await issueEDocument(tx, {
+    tenantId: actor.tenantId, terminal, company, invoiceId, number, seq, kind, documentType: "INVOICE", ts,
+    buyer: customer ? buyerOf(customer) : undefined, paymentMethod: mainMethod,
+    lines: priced.lines.map((l) => ({
+      lineNo: l.index, itemId: l.itemId, name: l.name, quantity: l.quantity, unitNet: l.unitNet, net: l.net,
+      taxPercent: l.taxPercent, tax: l.tax, gross: l.gross, taxCategory: l.taxCategory,
+    })),
+    totals: { net: priced.totalNet, tax: priced.totalTax, gross: priced.totalGross },
+  });
 
   await emit(tx, actor.tenantId, "InvoicePosted", { invoiceId, number, kind, total: priced.totalGross.toFixed(2) });
   await audit(tx, actor, "sale.created", "sales_invoice", invoiceId, { number, total: priced.totalGross.toFixed(2) });
@@ -312,29 +249,15 @@ export async function refundSale(tx: Tx, actor: Actor, input: { invoiceId: strin
     { type: "CREDIT_NOTE", id, date: ts.date },
   );
 
-  const signed = issueInvoice(
-    {
-      kind: "SIMPLIFIED", documentType: "CREDIT_NOTE", number, uuid: id, issueDate: ts.date, issueTime: ts.time, timestamp: ts.timestamp,
-      currency: company.currency, seller: sellerOf(company), paymentMeansCode: PAYMENT_MEANS[method], billingReference: orig.number, reason: input.reason,
-      lines: lines.rows.map((l) => ({
-        id: l.line_no, name: l.name, quantity: Money.of(l.quantity).toString(), unitPrice: Money.of(l.unit_net).toFixed(2),
-        lineNet: Money.of(l.net).toFixed(2), taxPercent: Money.of(l.tax_percent).toFixed(2), taxAmount: Money.of(l.tax).toFixed(2),
-        taxCategory: l.tax_category as UblLine["taxCategory"],
-      })),
-      totals: {
-        lineExtension: Money.of(orig.total_net).toFixed(2), taxExclusive: Money.of(orig.total_net).toFixed(2), taxTotal: Money.of(orig.total_tax).toFixed(2),
-        taxInclusive: Money.of(orig.total_gross).toFixed(2), allowanceTotal: "0.00", payable: Money.of(orig.total_gross).toFixed(2),
-      },
-    },
-    { icv: Number(terminal.icv), lastHash: terminal.last_hash },
-    { privateKeyPem: terminal.private_key_pem, publicKeyPem: terminal.public_key_pem },
-  );
-  await tx.query(
-    `INSERT INTO e_invoice_documents (tenant_id, invoice_id, terminal_id, authority, mode, icv, pih, hash, signature, qr, xml)
-     VALUES ($1,$2,$3,'ZATCA','REPORTING',$4,$5,$6,$7,$8,$9)`,
-    [actor.tenantId, id, terminal.id, signed.icv, signed.pih, signed.hash, signed.signature, signed.qr, signed.xml],
-  );
-  await tx.query("UPDATE pos_terminals SET invoice_seq=$1, icv=$2, last_hash=$3 WHERE id=$4", [seq, signed.nextChain.icv, signed.nextChain.lastHash, terminal.id]);
+  await issueEDocument(tx, {
+    tenantId: actor.tenantId, terminal, company, invoiceId: id, number, seq, kind: "SIMPLIFIED", documentType: "CREDIT_NOTE", ts,
+    paymentMethod: method, original: { invoiceId: orig.id, number: orig.number }, reason: input.reason,
+    lines: lines.rows.map((l) => ({
+      lineNo: l.line_no, itemId: l.item_id, name: l.name, quantity: Money.of(l.quantity), unitNet: Money.of(l.unit_net), net: Money.of(l.net),
+      taxPercent: Money.of(l.tax_percent), tax: Money.of(l.tax), gross: Money.of(l.gross), taxCategory: l.tax_category as EDocLine["taxCategory"],
+    })),
+    totals: { net: Money.of(orig.total_net), tax: Money.of(orig.total_tax), gross: Money.of(orig.total_gross) },
+  });
   await emit(tx, actor.tenantId, "CreditNotePosted", { id, number, originalInvoiceId: orig.id });
   await audit(tx, actor, "sale.refunded", "sales_invoice", id, { number, original: orig.number, reason: input.reason });
   return { ...(await getInvoice(tx, id)), replayed: false };

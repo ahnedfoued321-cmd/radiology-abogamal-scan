@@ -7,7 +7,7 @@ import type { Db } from "../db.js";
  * Auth uses the device's Production CSID (binarySecurityToken + secret) via HTTP Basic.
  */
 export interface ZatcaClient {
-  submit(doc: { hash: string; uuid: string; xmlBase64: string; mode: "REPORTING" | "CLEARANCE" }): Promise<{ status: "ACCEPTED" | "WARNING" | "REJECTED"; body: unknown }>;
+  submit(doc: { hash: string; uuid: string; xmlBase64: string; mode: "REPORTING" | "CLEARANCE" | "RECEIPT"; authority: "ZATCA" | "ETA" }): Promise<{ status: "ACCEPTED" | "WARNING" | "REJECTED"; body: unknown }>;
 }
 
 export class MockZatcaClient implements ZatcaClient {
@@ -19,7 +19,8 @@ export class MockZatcaClient implements ZatcaClient {
 export class HttpZatcaClient implements ZatcaClient {
   constructor(private readonly baseUrl: string, private readonly csidToken: string, private readonly csidSecret: string) {}
 
-  async submit(doc: { hash: string; uuid: string; xmlBase64: string; mode: "REPORTING" | "CLEARANCE" }) {
+  async submit(doc: { hash: string; uuid: string; xmlBase64: string; mode: "REPORTING" | "CLEARANCE" | "RECEIPT"; authority: "ZATCA" | "ETA" }) {
+    if (doc.authority !== "ZATCA") throw new Error("HttpZatcaClient only submits ZATCA documents");
     const clearance = doc.mode === "CLEARANCE";
     const res = await fetch(`${this.baseUrl}/invoices/${clearance ? "clearance" : "reporting"}/single`, {
       method: "POST",
@@ -49,8 +50,8 @@ export async function reportPending(ownerDb: Db, client: ZatcaClient, batchSize 
   let processed = 0, accepted = 0, rejected = 0;
   try {
     await conn.query("BEGIN");
-    const docs = await conn.query<{ id: string; invoice_id: string; hash: string; xml: string; mode: "REPORTING" | "CLEARANCE" }>(
-      `SELECT id, invoice_id, hash, xml, mode FROM e_invoice_documents
+    const docs = await conn.query<{ id: string; invoice_id: string; hash: string; xml: string; mode: "REPORTING" | "CLEARANCE" | "RECEIPT"; authority: "ZATCA" | "ETA" }>(
+      `SELECT id, invoice_id, hash, xml, mode, authority FROM e_invoice_documents
         WHERE status = 'PENDING' AND attempts < 10
         ORDER BY (mode = 'CLEARANCE') DESC, terminal_id, icv LIMIT $1 FOR UPDATE SKIP LOCKED`,
       [batchSize],
@@ -58,7 +59,7 @@ export async function reportPending(ownerDb: Db, client: ZatcaClient, batchSize 
     for (const d of docs.rows) {
       processed++;
       try {
-        const r = await client.submit({ hash: d.hash, uuid: d.invoice_id, mode: d.mode, xmlBase64: Buffer.from(d.xml, "utf8").toString("base64") });
+        const r = await client.submit({ hash: d.hash, uuid: d.invoice_id, mode: d.mode, authority: d.authority, xmlBase64: Buffer.from(d.xml, "utf8").toString("base64") });
         if (r.status === "REJECTED") rejected++;
         else accepted++;
         await conn.query(
@@ -77,4 +78,14 @@ export async function reportPending(ownerDb: Db, client: ZatcaClient, batchSize 
     conn.release();
   }
   return { processed, accepted, rejected };
+}
+
+/** Routes each document to its authority's client (ZATCA for KSA, ETA for Egypt). */
+export class RoutingClient implements ZatcaClient {
+  constructor(private readonly clients: Partial<Record<"ZATCA" | "ETA", ZatcaClient>>) {}
+  async submit(doc: Parameters<ZatcaClient["submit"]>[0]) {
+    const c = this.clients[doc.authority];
+    if (!c) throw new Error(`No submission client configured for ${doc.authority}`);
+    return c.submit(doc);
+  }
 }

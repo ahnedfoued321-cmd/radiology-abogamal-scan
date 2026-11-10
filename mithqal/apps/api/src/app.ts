@@ -32,7 +32,7 @@ const schemas = {
   onboarding: z.object({
     businessNameAr: z.string().min(2),
     businessNameEn: z.string().optional(),
-    country: z.literal("SA"),
+    country: z.enum(["SA", "EG"]),
     industry: z.enum(["retail", "cafe", "restaurant", "pharmacy", "distribution", "services"]),
     vatNumber: z.string().optional(),
     crNumber: z.string().optional(),

@@ -2,13 +2,14 @@ import { randomUUID } from "node:crypto";
 import bcrypt from "bcryptjs";
 import { SA_RETAIL_CHART } from "@mithqal/domain";
 import { NEW_DEVICE_CHAIN, generateDeviceKeys } from "@mithqal/zatca";
+import { isValidEgyptRin } from "@mithqal/eta";
 import { BusinessError, withTenant, type Db, type Tx } from "../db.js";
 import { audit } from "./core.js";
 
 export interface OnboardingInput {
   businessNameAr: string;
   businessNameEn?: string;
-  country: "SA";
+  country: "SA" | "EG";
   industry: "retail" | "cafe" | "restaurant" | "pharmacy" | "distribution" | "services";
   vatNumber?: string;
   crNumber?: string;
@@ -19,15 +20,20 @@ export interface OnboardingInput {
 
 /** Country packs: everything country-specific lives here, not in the core. */
 export const COUNTRY_PACKS = {
-  SA: { currency: "SAR", vatPercent: "15", chart: SA_RETAIL_CHART },
+  SA: { currency: "SAR", vatPercent: "15", chart: SA_RETAIL_CHART, initialChainHash: NEW_DEVICE_CHAIN.lastHash },
+  // Egypt: EGP, VAT 14%, ETA e-receipt chain starts with an empty previousUUID.
+  EG: { currency: "EGP", vatPercent: "14", chart: SA_RETAIL_CHART, initialChainHash: "" },
 } as const;
 
 /** "10-minute onboarding": one call creates tenant, company, branch, warehouse, POS, chart, owner. */
 export async function onboard(db: Db, input: OnboardingInput) {
   const pack = COUNTRY_PACKS[input.country];
   if (!pack) throw new BusinessError(`Country ${input.country} not supported yet`);
-  if (input.vatNumber && !/^3\d{13}3$/.test(input.vatNumber)) {
+  if (input.country === "SA" && input.vatNumber && !/^3\d{13}3$/.test(input.vatNumber)) {
     throw new BusinessError("رقم التسجيل الضريبي يجب أن يكون 15 رقمًا يبدأ وينتهي بالرقم 3");
+  }
+  if (input.country === "EG" && input.vatNumber && !isValidEgyptRin(input.vatNumber)) {
+    throw new BusinessError("رقم التسجيل الضريبي المصري يجب أن يكون 9 أرقام");
   }
   const existing = await db.query("SELECT 1 FROM auth_lookup($1)", [input.owner.email.toLowerCase()]);
   if (existing.rowCount) throw new BusinessError("البريد الإلكتروني مسجل بالفعل");
@@ -64,7 +70,7 @@ export async function onboard(db: Db, input: OnboardingInput) {
         [tenantId, acc.code, acc.nameAr, acc.nameEn, acc.type, acc.parentCode ?? null, acc.role ?? null, acc.postable],
       );
     }
-    const terminalId = await createTerminal(tx, tenantId, branchId, wh.rows[0]!.id, "كاشير 1", "POS1");
+    const terminalId = await createTerminal(tx, tenantId, branchId, wh.rows[0]!.id, "كاشير 1", "POS1", pack.initialChainHash);
     const user = await tx.query<{ id: string }>(
       `INSERT INTO users (tenant_id, email, password_hash, full_name, role) VALUES ($1,$2,$3,$4,'owner') RETURNING id`,
       [tenantId, input.owner.email.toLowerCase(), passwordHash, input.owner.fullName],
@@ -75,12 +81,14 @@ export async function onboard(db: Db, input: OnboardingInput) {
   });
 }
 
-export async function createTerminal(tx: Tx, tenantId: string, branchId: string, warehouseId: string, name: string, prefix: string): Promise<string> {
+export async function createTerminal(
+  tx: Tx, tenantId: string, branchId: string, warehouseId: string, name: string, prefix: string, initialChainHash?: string,
+): Promise<string> {
   const keys = generateDeviceKeys();
   const r = await tx.query<{ id: string }>(
     `INSERT INTO pos_terminals (tenant_id, branch_id, warehouse_id, name, prefix, icv, last_hash, private_key_pem, public_key_pem)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
-    [tenantId, branchId, warehouseId, name, prefix, NEW_DEVICE_CHAIN.icv, NEW_DEVICE_CHAIN.lastHash, keys.privateKeyPem, keys.publicKeyPem],
+    [tenantId, branchId, warehouseId, name, prefix, NEW_DEVICE_CHAIN.icv, initialChainHash ?? NEW_DEVICE_CHAIN.lastHash, keys.privateKeyPem, keys.publicKeyPem],
   );
   return r.rows[0]!.id;
 }

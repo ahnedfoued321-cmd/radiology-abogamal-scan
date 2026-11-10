@@ -2,7 +2,7 @@ import { buildApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { createPool } from "./db.js";
 import { migrate } from "./migrate.js";
-import { HttpZatcaClient, MockZatcaClient, reportPending } from "./services/einvoice-worker.js";
+import { HttpZatcaClient, MockZatcaClient, reportPending, RoutingClient } from "./services/einvoice-worker.js";
 
 const ZATCA_URLS = {
   sandbox: "https://gw-fatoora.zatca.gov.sa/e-invoicing/developer-portal",
@@ -16,10 +16,14 @@ const db = createPool(config.appUrl);
 const ownerDb = createPool(config.migrationUrl);
 const app = buildApp(db, config, ownerDb);
 
-const zatca =
-  config.zatcaMode === "mock"
-    ? new MockZatcaClient()
-    : new HttpZatcaClient(ZATCA_URLS[config.zatcaMode], process.env.ZATCA_CSID_TOKEN ?? "", process.env.ZATCA_CSID_SECRET ?? "");
+const zatca = new RoutingClient({
+  ZATCA:
+    config.zatcaMode === "mock"
+      ? new MockZatcaClient()
+      : new HttpZatcaClient(ZATCA_URLS[config.zatcaMode], process.env.ZATCA_CSID_TOKEN ?? "", process.env.ZATCA_CSID_SECRET ?? ""),
+  // ETA receipt submission (OAuth POS client credentials) is the next integration; receipts queue until then.
+  ETA: config.zatcaMode === "mock" ? new MockZatcaClient() : undefined,
+});
 
 // E-invoice reporting loop (simplified invoices must reach ZATCA within 24h).
 const timer = setInterval(() => {

@@ -29,6 +29,9 @@ importers:
       '@mithqal/domain':
         specifier: workspace:*
         version: link:../../packages/domain
+      '@mithqal/eta':
+        specifier: workspace:*
+        version: link:../../packages/eta
       '@mithqal/money':
         specifier: workspace:*
         version: link:../../packages/money
@@ -93,6 +96,12 @@ importers:
         version: 5.4.11(@types/node@22.10.2)
 
   packages/domain:
+    dependencies:
+      '@mithqal/money':
+        specifier: workspace:*
+        version: link:../money
+
+  packages/eta:
     dependencies:
       '@mithqal/money':
         specifier: workspace:*
