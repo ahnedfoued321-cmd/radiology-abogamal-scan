@@ -4,6 +4,7 @@ import jwt from "@fastify/jwt";
 import bcrypt from "bcryptjs";
 import { z, ZodError } from "zod";
 import type { Config } from "./config.js";
+import { Money } from "@mithqal/money";
 import { BusinessError, maybeOne, withTenant, type Db } from "./db.js";
 import { audit, type Actor } from "./services/core.js";
 import { onboard } from "./services/onboarding.js";
@@ -50,6 +51,7 @@ const schemas = {
     trackStock: z.boolean().default(true),
     trackBatches: z.boolean().default(false),
     reorderLevel: qty.default("0"),
+    unit: z.enum(["pcs", "g", "kg", "ml", "l", "box", "strip", "carton"]).default("pcs"),
   }),
   receipt: z.object({
     warehouseId: z.string().uuid(),
@@ -184,15 +186,69 @@ export function buildApp(db: Db, config: Config): FastifyInstance {
     const row = await T(req, async (tx) => {
       const company = await tx.query<{ vat_percent: string }>("SELECT vat_percent FROM companies LIMIT 1");
       const r = await tx.query(
-        `INSERT INTO items (tenant_id, sku, barcode, name_ar, name_en, category, price, tax_percent, track_stock, track_batches, reorder_level)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+        `INSERT INTO items (tenant_id, sku, barcode, name_ar, name_en, category, price, tax_percent, track_stock, track_batches, reorder_level, unit)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
         [req.user.tid, i.sku, i.barcode ?? null, i.nameAr, i.nameEn ?? null, i.category ?? null, i.price, i.taxPercent ?? company.rows[0]!.vat_percent,
-          i.trackStock, i.trackBatches, i.reorderLevel],
+          i.trackStock, i.trackBatches, i.reorderLevel, i.unit],
       );
       await audit(tx, actorOf(req), "item.created", "item", r.rows[0].id, { sku: i.sku });
       return r.rows[0];
     });
     return reply.status(201).send(row);
+  });
+
+  // ───── F&B: recipes & live menu costing ─────
+  app.put("/v1/items/:id/recipe", { preHandler: auth("owner") }, async (req) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
+    const b = z.object({ lines: z.array(z.object({ ingredientId: z.string().uuid(), quantity: qty })).max(50) }).parse(req.body);
+    return T(req, async (tx) => {
+      const item = await maybeOne<{ track_stock: boolean }>(tx, "SELECT track_stock FROM items WHERE id=$1", [id]);
+      if (!item) throw new BusinessError("الصنف غير موجود");
+      if (item.track_stock) throw new BusinessError("الوصفة لأصناف المنيو فقط (أصناف لا يُتابع مخزونها مباشرة)");
+      for (const l of b.lines) {
+        const ing = await maybeOne<{ track_stock: boolean }>(tx, "SELECT track_stock FROM items WHERE id=$1", [l.ingredientId]);
+        if (!ing?.track_stock) throw new BusinessError("مكوّن الوصفة يجب أن يكون صنفًا مخزنيًا");
+        if (Number(l.quantity) <= 0) throw new BusinessError("كمية المكوّن يجب أن تكون أكبر من صفر");
+      }
+      await tx.query("DELETE FROM recipe_lines WHERE item_id=$1", [id]);
+      for (const l of b.lines) {
+        await tx.query("INSERT INTO recipe_lines (tenant_id, item_id, ingredient_id, quantity) VALUES ($1,$2,$3,$4)", [req.user.tid, id, l.ingredientId, l.quantity]);
+      }
+      await audit(tx, actorOf(req), "recipe.updated", "item", id, b);
+      return { itemId: id, lines: b.lines.length };
+    });
+  });
+
+  app.get("/v1/reports/menu-costing", { preHandler: auth("owner", "accountant") }, async (req) => {
+    const { targetMargin } = z.object({ targetMargin: z.coerce.number().min(0).max(100).default(65) }).parse(req.query);
+    return T(req, async (tx) => {
+      const rows = (await tx.query<{ id: string; name_ar: string; price: string; tax_percent: string; cost: string }>(
+        `SELECT i.id, i.name_ar, i.price, i.tax_percent,
+                sum(r.quantity * coalesce((SELECT sum(b.quantity*b.average_cost)/nullif(sum(b.quantity),0)
+                                             FROM stock_balances b WHERE b.item_id=r.ingredient_id AND b.quantity > 0), 0)) AS cost
+           FROM items i JOIN recipe_lines r ON r.item_id = i.id
+          GROUP BY i.id ORDER BY i.name_ar`,
+      )).rows;
+      const company = await tx.query<{ prices_include_tax: boolean }>("SELECT prices_include_tax FROM companies LIMIT 1");
+      const inclusive = company.rows[0]!.prices_include_tax;
+      return rows.map((r) => {
+        const net = inclusive ? Money.of(r.price).div(Money.of(1).add(Money.of(r.tax_percent).div(100))) : Money.of(r.price);
+        const cost = Money.of(r.cost);
+        const margin = net.isZero() ? Money.zero() : net.sub(cost).div(net).mul(100);
+        // price needed (incl. VAT) to hit the target margin
+        const neededNet = cost.div(Money.of(1).sub(Money.of(targetMargin).div(100)));
+        const neededGross = inclusive ? neededNet.mul(Money.of(1).add(Money.of(r.tax_percent).div(100))) : neededNet;
+        return {
+          itemId: r.id,
+          name: r.name_ar,
+          price: Money.of(r.price).toFixed(2),
+          costPerUnit: cost.toFixed(2),
+          marginPercent: margin.toFixed(1),
+          belowTarget: margin.lt(targetMargin),
+          suggestedPrice: margin.lt(targetMargin) ? neededGross.toFixed(2) : null,
+        };
+      });
+    });
   });
 
   // ───── Customers ─────

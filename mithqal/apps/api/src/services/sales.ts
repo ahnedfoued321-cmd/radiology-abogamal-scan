@@ -173,7 +173,22 @@ export async function createSale(tx: Tx, actor: Actor, input: SaleInput) {
   for (const l of priced.lines) {
     const it = itemMap.get(l.itemId)!;
     if (!it.track_stock) {
-      unitCosts.push(Money.zero());
+      // Menu items with a recipe consume their ingredients (live cost per cup); services cost nothing.
+      const recipe = await tx.query<{ ingredient_id: string; quantity: string; track_batches: boolean }>(
+        `SELECT r.ingredient_id, r.quantity, i.track_batches FROM recipe_lines r JOIN items i ON i.id = r.ingredient_id
+          WHERE r.item_id=$1 ORDER BY r.ingredient_id`,
+        [l.itemId],
+      );
+      let lineCost = Money.zero();
+      for (const r of recipe.rows) {
+        const c = await issueForSale(tx, actor.tenantId, {
+          itemId: r.ingredient_id, warehouseId: terminal.warehouse_id, quantity: Money.of(r.quantity).mul(l.quantity).toStorage(),
+          allowNegative: company.allow_negative_stock, trackBatches: r.track_batches, today: ts.date, sourceId: invoiceId,
+        });
+        lineCost = lineCost.add(c.totalCost);
+      }
+      unitCosts.push(lineCost.div(l.quantity).round(4));
+      cogs = cogs.add(lineCost);
       continue;
     }
     const c = await issueForSale(tx, actor.tenantId, {
@@ -278,10 +293,17 @@ export async function refundSale(tx: Tx, actor: Actor, input: { invoiceId: strin
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
       [actor.tenantId, id, l.line_no, l.item_id, l.name, l.quantity, l.unit_net, l.discount_net, l.net, l.tax_percent, l.tax, l.gross, l.tax_category, l.unit_cost],
     );
-    const it = await one<{ track_stock: boolean; track_batches: boolean }>(tx, "SELECT track_stock, track_batches FROM items WHERE id=$1", [l.item_id]);
-    if (it.track_stock && !it.track_batches) {
-      await returnToStock(tx, actor.tenantId, { itemId: l.item_id, warehouseId: terminal.warehouse_id, quantity: l.quantity, unitCost: l.unit_cost, sourceId: id });
-    }
+  }
+  // Restock by replaying the original sale's stock moves in reverse: plain items, recipe ingredients and batches
+  // all return at the exact cost they left at, so inventory value and the ledger reversal stay in sync.
+  const moves = await tx.query<{ item_id: string; warehouse_id: string; batch_id: string | null; quantity: string; unit_cost: string }>(
+    "SELECT item_id, warehouse_id, batch_id, quantity, unit_cost FROM stock_moves WHERE source_id=$1 AND source_type='SALE'",
+    [orig.id],
+  );
+  for (const m of moves.rows) {
+    await returnToStock(tx, actor.tenantId, {
+      itemId: m.item_id, warehouseId: m.warehouse_id, batchId: m.batch_id, quantity: Money.of(m.quantity).neg().toStorage(), unitCost: m.unit_cost, sourceId: id,
+    });
   }
   await tx.query("INSERT INTO payments (tenant_id, invoice_id, method, amount) VALUES ($1,$2,$3,$4)", [actor.tenantId, id, method, Money.of(orig.total_gross).neg().toStorage()]);
   await postJournal(

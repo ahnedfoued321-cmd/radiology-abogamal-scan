@@ -122,16 +122,19 @@ export async function issueForSale(
 export async function returnToStock(
   tx: Tx,
   tenantId: string,
-  opts: { itemId: string; warehouseId: string; quantity: string; unitCost: string; sourceId: string },
+  opts: { itemId: string; warehouseId: string; quantity: string; unitCost: string; sourceId: string; batchId?: string | null },
 ): Promise<void> {
+  if (opts.batchId) {
+    await tx.query("UPDATE item_batches SET quantity = quantity + $1 WHERE id=$2", [opts.quantity, opts.batchId]);
+  }
   const bal = await lockBalance(tx, tenantId, opts.itemId, opts.warehouseId);
   const pos = receive({ quantity: Money.of(bal.quantity), averageCost: Money.of(bal.average_cost) }, opts.quantity, opts.unitCost);
   await tx.query("UPDATE stock_balances SET quantity=$1, average_cost=$2 WHERE item_id=$3 AND warehouse_id=$4", [
     pos.quantity.toStorage(), pos.averageCost.toStorage(), opts.itemId, opts.warehouseId,
   ]);
   await tx.query(
-    `INSERT INTO stock_moves (tenant_id, item_id, warehouse_id, quantity, unit_cost, source_type, source_id)
-     VALUES ($1,$2,$3,$4,$5,'SALE_RETURN',$6)`,
-    [tenantId, opts.itemId, opts.warehouseId, opts.quantity, opts.unitCost, opts.sourceId],
+    `INSERT INTO stock_moves (tenant_id, item_id, warehouse_id, batch_id, quantity, unit_cost, source_type, source_id)
+     VALUES ($1,$2,$3,$7,$4,$5,'SALE_RETURN',$6)`,
+    [tenantId, opts.itemId, opts.warehouseId, opts.quantity, opts.unitCost, opts.sourceId, opts.batchId ?? null],
   );
 }
