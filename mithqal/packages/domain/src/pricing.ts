@@ -1,3 +1,4 @@
+import { DomainError } from "./errors.js";
 import { Money, taxFromGross, taxFromNet, type DecimalInput } from "@mithqal/money";
 
 export interface PriceLineInput {
@@ -38,16 +39,16 @@ export interface PricedDocument {
  * exact sum of rounded lines, so totals always reconcile with the e-invoice XML.
  */
 export function priceDocument(lines: PriceLineInput[], opts: { currency: string; pricesIncludeTax: boolean }): PricedDocument {
-  if (lines.length === 0) throw new Error("Document must contain at least one line");
+  if (lines.length === 0) throw new DomainError("Document must contain at least one line");
   const priced = lines.map((l, index): PricedLine => {
     const qty = Money.of(l.quantity);
-    if (!qty.gt(0)) throw new Error(`Line ${index + 1}: quantity must be positive`);
+    if (!qty.gt(0)) throw new DomainError(`Line ${index + 1}: quantity must be positive`);
     const price = Money.of(l.unitPrice);
-    if (price.isNegative()) throw new Error(`Line ${index + 1}: price cannot be negative`);
+    if (price.isNegative()) throw new DomainError(`Line ${index + 1}: price cannot be negative`);
     const discount = Money.of(l.discount ?? 0);
     const extended = price.mul(qty);
     if (discount.isNegative() || discount.gt(extended)) {
-      throw new Error(`Line ${index + 1}: invalid discount`);
+      throw new DomainError(`Line ${index + 1}: invalid discount`);
     }
     const rate = Money.of(l.taxPercent);
     const cat = l.taxCategory ?? (rate.isZero() ? "Z" : "S");

@@ -100,7 +100,13 @@ export interface LlmAnswer {
 }
 
 /** Run the tool loop. Returns null when the model refused or the loop didn't finish — caller falls back. */
-export async function askLlm(client: LlmClient, tx: Tx, question: string, now = new Date(), maxTurns = 6): Promise<LlmAnswer | null> {
+export async function askLlm(
+  client: LlmClient,
+  inTenant: <R>(fn: (tx: Tx) => Promise<R>) => Promise<R>,
+  question: string,
+  now = new Date(),
+  maxTurns = 6,
+): Promise<LlmAnswer | null> {
   const messages: Anthropic.Beta.BetaMessageParam[] = [
     { role: "user", content: `تاريخ اليوم: ${now.toISOString().slice(0, 10)}\n\nالسؤال: ${question}` },
   ];
@@ -127,7 +133,8 @@ export async function askLlm(client: LlmClient, tx: Tx, question: string, now = 
       messages.push({ role: "assistant", content: response.content });
       const results: Anthropic.Beta.BetaToolResultBlockParam[] = [];
       for (const t of toolUses) {
-        const r = await runTool(tx, t.name, t.input);
+        // short transaction per tool call — no DB connection is held while waiting on the model
+        const r = await inTenant((tx) => runTool(tx, t.name, t.input));
         toolsUsed.push(t.name);
         results.push({ type: "tool_result", tool_use_id: t.id, content: r.content, is_error: r.isError });
       }

@@ -91,9 +91,16 @@ describe("catalog & stock", () => {
     expect(latte.tax_percent).toBe("15.00");
   });
 
+  it("treats receipts without a supplier as opening stock (no VAT, no payable)", async () => {
+    const extra = (await call("POST", "/v1/items", token, { sku: "OPEN1", nameAr: "صنف افتتاحي", price: "5.00" })).body;
+    const r = await call("POST", "/v1/inventory/receipts", token, { warehouseId, reference: "رصيد افتتاحي", lines: [{ itemId: extra.id, quantity: "4", unitCost: "2.00" }] });
+    expect(r.body.tax).toBe("0.00");
+  });
+
   it("receives goods and posts inventory + input VAT", async () => {
+    const supplier = (await call("POST", "/v1/suppliers", token, { name: "محمصة الرياض" })).body;
     const r = await call("POST", "/v1/inventory/receipts", token, {
-      warehouseId, reference: "PO-1",
+      warehouseId, reference: "PO-1", supplierId: supplier.id,
       lines: [
         { itemId: latte.id, quantity: "20", unitCost: "5.00" },
         { itemId: croissant.id, quantity: "10", unitCost: "3.00" },

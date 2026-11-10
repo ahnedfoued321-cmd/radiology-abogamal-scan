@@ -1,7 +1,7 @@
 import { Money } from "@mithqal/money";
 import { allocateFefo, issue, postPurchase, receive } from "@mithqal/domain";
-import { BusinessError, one, type Tx } from "../db.js";
-import { audit, emit, postJournal, type Actor } from "./core.js";
+import { BusinessError, maybeOne, one, type Tx } from "../db.js";
+import { assertVisible, audit, emit, postJournal, postRevaluation, type Actor } from "./core.js";
 
 interface BalanceRow {
   quantity: string;
@@ -31,16 +31,29 @@ export async function receiveGoods(
   input: { warehouseId: string; reference: string; lines: ReceiptLine[]; paidCash?: boolean; date: string; supplierId?: string; poId?: string },
 ): Promise<{ receiptId: string; net: string; tax: string }> {
   const company = await one<{ vat_percent: string; currency: string }>(tx, "SELECT vat_percent, currency FROM companies LIMIT 1");
+  await assertVisible(tx, "warehouses", input.warehouseId, "المستودع");
+  await assertVisible(tx, "suppliers", input.supplierId, "المورد");
+  const openingStock = !input.supplierId && !input.paidCash;
   const receiptId = crypto.randomUUID();
   let net = Money.zero();
-  for (const l of input.lines) {
-    const item = await one<{ track_stock: boolean; track_batches: boolean }>(
-      tx, "SELECT track_stock, track_batches FROM items WHERE id=$1", [l.itemId],
+  let tax = Money.zero();
+  let revaluation = Money.zero();
+  // lock stock rows in a stable order (item id) to avoid deadlocks with concurrent sales/transfers
+  const lines = [...input.lines].sort((a, b) => a.itemId.localeCompare(b.itemId));
+  for (const l of lines) {
+    const item = await maybeOne<{ track_stock: boolean; track_batches: boolean; tax_percent: string }>(
+      tx, "SELECT track_stock, track_batches, tax_percent FROM items WHERE id=$1", [l.itemId],
     );
+    if (!item) throw new BusinessError("الصنف غير موجود");
     if (!item.track_stock) throw new BusinessError("لا يمكن استلام صنف خدمي في المخزون");
     if (item.track_batches && !l.batchNo) throw new BusinessError("هذا الصنف يتطلب رقم تشغيلة وتاريخ صلاحية");
     const bal = await lockBalance(tx, actor.tenantId, l.itemId, input.warehouseId);
-    const pos = receive({ quantity: Money.of(bal.quantity), averageCost: Money.of(bal.average_cost) }, l.quantity, l.unitCost);
+    const before = { quantity: Money.of(bal.quantity), averageCost: Money.of(bal.average_cost) };
+    const pos = receive(before, l.quantity, l.unitCost);
+    // valuation the ledger will not see from this receipt alone (covering negative stock at a new cost)
+    revaluation = revaluation.add(
+      pos.quantity.mul(pos.averageCost).sub(before.quantity.mul(before.averageCost)).sub(Money.of(l.quantity).mul(l.unitCost)),
+    );
     await tx.query("UPDATE stock_balances SET quantity=$1, average_cost=$2 WHERE item_id=$3 AND warehouse_id=$4", [
       pos.quantity.toStorage(), pos.averageCost.toStorage(), l.itemId, input.warehouseId,
     ]);
@@ -60,17 +73,21 @@ export async function receiveGoods(
        VALUES ($1,$2,$3,$4,$5,$6,'GOODS_RECEIPT',$7)`,
       [actor.tenantId, l.itemId, input.warehouseId, batchId, l.quantity, l.unitCost, receiptId],
     );
-    net = net.add(Money.of(l.quantity).mul(l.unitCost).roundTo(company.currency));
+    const lineNet = Money.of(l.quantity).mul(l.unitCost).roundTo(company.currency);
+    net = net.add(lineNet);
+    // input VAT at each item's own rate (zero-rated medicines carry no VAT)
+    tax = tax.add(lineNet.mul(Money.of(item.tax_percent).div(100)).roundTo(company.currency));
   }
-  const tax = net.mul(Money.of(company.vat_percent).div(100)).roundTo(company.currency);
+  if (openingStock) tax = Money.zero();
   await tx.query(
     `INSERT INTO goods_receipts (id, tenant_id, supplier_id, po_id, warehouse_id, reference, net, tax, paid_cash)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
     [receiptId, actor.tenantId, input.supplierId ?? null, input.poId ?? null, input.warehouseId, input.reference, net.toStorage(), tax.toStorage(), input.paidCash ?? false],
   );
-  await postJournal(tx, actor, postPurchase({ reference: input.reference, net, tax, paidCash: input.paidCash }), {
+  await postJournal(tx, actor, postPurchase({ reference: input.reference, net, tax, paidCash: input.paidCash, openingStock }), {
     type: "GOODS_RECEIPT", id: receiptId, date: input.date,
   });
+  await postRevaluation(tx, actor, revaluation, { type: "GOODS_RECEIPT", id: receiptId, date: input.date });
   await emit(tx, actor.tenantId, "GoodsReceived", { receiptId, reference: input.reference });
   await audit(tx, actor, "stock.received", "goods_receipt", receiptId, { reference: input.reference, lines: input.lines.length });
   return { receiptId, net: net.toFixed(), tax: tax.toFixed() };
@@ -128,12 +145,14 @@ export async function returnToStock(
   tx: Tx,
   tenantId: string,
   opts: { itemId: string; warehouseId: string; quantity: string; unitCost: string; sourceId: string; batchId?: string | null },
-): Promise<void> {
+): Promise<Money> {
   if (opts.batchId) {
     await tx.query("UPDATE item_batches SET quantity = quantity + $1 WHERE id=$2", [opts.quantity, opts.batchId]);
   }
   const bal = await lockBalance(tx, tenantId, opts.itemId, opts.warehouseId);
-  const pos = receive({ quantity: Money.of(bal.quantity), averageCost: Money.of(bal.average_cost) }, opts.quantity, opts.unitCost);
+  const before = { quantity: Money.of(bal.quantity), averageCost: Money.of(bal.average_cost) };
+  const pos = receive(before, opts.quantity, opts.unitCost);
+  const delta = pos.quantity.mul(pos.averageCost).sub(before.quantity.mul(before.averageCost)).sub(Money.of(opts.quantity).mul(opts.unitCost));
   await tx.query("UPDATE stock_balances SET quantity=$1, average_cost=$2 WHERE item_id=$3 AND warehouse_id=$4", [
     pos.quantity.toStorage(), pos.averageCost.toStorage(), opts.itemId, opts.warehouseId,
   ]);
@@ -142,4 +161,5 @@ export async function returnToStock(
      VALUES ($1,$2,$3,$7,$4,$5,'SALE_RETURN',$6)`,
     [tenantId, opts.itemId, opts.warehouseId, opts.quantity, opts.unitCost, opts.sourceId, opts.batchId ?? null],
   );
+  return delta;
 }

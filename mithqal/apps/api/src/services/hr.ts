@@ -82,7 +82,7 @@ export async function runPayroll(tx: Tx, actor: Actor, input: { period: string; 
         JSON.stringify(p.lines.map((l) => ({ code: l.code, employee: l.employee.toFixed(2), employer: l.employer.toFixed(2) })))],
     );
   }
-  await postJournal(tx, actor, postPayroll({ period: input.period, gross, employeeContrib: ee, employerContrib: er }), {
+  await postJournal(tx, actor, postPayroll({ period: input.period, gross, employeeContrib: ee, employerContrib: er, deductions: ded }), {
     type: "PAYROLL", id: runId, date: periodEnd,
   });
   await emit(tx, actor.tenantId, "PayrollPosted", { runId, period: input.period, net: net.toFixed(2) });

@@ -83,7 +83,7 @@ describe("purchasing cycle", () => {
     const today = new Date().toISOString().slice(0, 10);
     const tb = await call("GET", `/v1/reports/trial-balance?from=${today}&to=${today}`, owner);
     expect(tb.body.balanced).toBe(true);
-    // AP = opening receipt without supplier (200 + 30 VAT) + this supplier (172.50) − payment (100)
-    expect(tb.body.rows.find((r: any) => r.code === "2101").balance).toBe("-302.50");
+    // AP = this supplier (172.50) − payment (100); the opening receipt had no supplier, so it is equity, not AP
+    expect(tb.body.rows.find((r: any) => r.code === "2101").balance).toBe("-72.50");
   });
 });

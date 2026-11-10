@@ -67,6 +67,7 @@ describe("HR & payroll (KSA)", () => {
     const tb = await call("GET", "/v1/reports/trial-balance?from=2026-10-01&to=2026-10-31", token);
     expect(tb.body.balanced).toBe(true);
     expect(tb.body.rows.find((x: any) => x.code === "2130").balance).toBe("-2250.00");
+    expect(tb.body.rows.find((x: any) => x.code === "2120").balance).toBe("-15075.00"); // salaries payable = bank file total
   });
 
   it("exports the salary bank file", async () => {

@@ -1,7 +1,7 @@
 import { Money } from "@mithqal/money";
 import { DEFAULT_GEOFENCE_METERS, distanceMeters, issue, planRoute, postCollection, receive, type CollectionMethod } from "@mithqal/domain";
 import { BusinessError, maybeOne, one, type Tx } from "../db.js";
-import { audit, emit, postJournal, type Actor } from "./core.js";
+import { assertVisible, audit, emit, lockKey, postJournal, postRevaluation, type Actor } from "./core.js";
 import { createTerminal } from "./onboarding.js";
 import { requireCapacity, requireModule } from "./licensing.js";
 
@@ -14,6 +14,7 @@ export async function setupVan(tx: Tx, actor: Actor, input: { userId: string; ve
   await requireModule(tx, "van_sales");
   await requireCapacity(tx, "vans");
   const branch = await one<{ id: string }>(tx, "SELECT id FROM branches ORDER BY name LIMIT 1");
+  await lockKey(tx, `terminal-number:${actor.tenantId}`);
   const n = (await one<{ n: string }>(tx, "SELECT count(*) AS n FROM van_assignments")).n;
   const wh = await one<{ id: string }>(tx, "INSERT INTO warehouses (tenant_id, branch_id, name) VALUES ($1,$2,$3) RETURNING id", [
     actor.tenantId, branch.id, `سيارة ${rep.full_name}`,
@@ -42,12 +43,15 @@ export async function transferStock(
   input: { fromWarehouseId: string; toWarehouseId: string; reference?: string; lines: { itemId: string; quantity: string }[] },
 ) {
   if (input.fromWarehouseId === input.toWarehouseId) throw new BusinessError("لا يمكن التحويل لنفس المستودع");
+  await assertVisible(tx, "warehouses", input.fromWarehouseId, "المستودع");
+  await assertVisible(tx, "warehouses", input.toWarehouseId, "المستودع");
   const t = await one<{ id: string }>(
     tx,
     "INSERT INTO stock_transfers (tenant_id, from_warehouse_id, to_warehouse_id, reference, created_by) VALUES ($1,$2,$3,$4,$5) RETURNING id",
     [actor.tenantId, input.fromWarehouseId, input.toWarehouseId, input.reference ?? null, actor.userId],
   );
-  for (const l of input.lines) {
+  let revaluation = Money.zero();
+  for (const l of [...input.lines].sort((a, b) => a.itemId.localeCompare(b.itemId))) {
     const item = await one<{ track_stock: boolean; track_batches: boolean; name_ar: string }>(tx, "SELECT track_stock, track_batches, name_ar FROM items WHERE id=$1", [l.itemId]);
     if (!item.track_stock) throw new BusinessError(`الصنف ${item.name_ar} خدمي ولا يُحوَّل`);
     if (item.track_batches) throw new BusinessError(`تحويل الأصناف ذات التشغيلات غير مدعوم بعد: ${item.name_ar}`);
@@ -71,7 +75,9 @@ export async function transferStock(
       throw new BusinessError(`الكمية غير متوفرة من ${item.name_ar}`);
     }
     const unitCost = Money.of(src.average_cost);
-    const into = receive({ quantity: Money.of(dst.quantity), averageCost: Money.of(dst.average_cost) }, l.quantity, unitCost);
+    const dstBefore = { quantity: Money.of(dst.quantity), averageCost: Money.of(dst.average_cost) };
+    const into = receive(dstBefore, l.quantity, unitCost);
+    revaluation = revaluation.add(into.quantity.mul(into.averageCost).sub(dstBefore.quantity.mul(dstBefore.averageCost)).sub(Money.of(l.quantity).mul(unitCost)));
     await tx.query("UPDATE stock_balances SET quantity=$1 WHERE item_id=$2 AND warehouse_id=$3", [out.position.quantity.toStorage(), l.itemId, input.fromWarehouseId]);
     await tx.query("UPDATE stock_balances SET quantity=$1, average_cost=$2 WHERE item_id=$3 AND warehouse_id=$4", [
       into.quantity.toStorage(), into.averageCost.toStorage(), l.itemId, input.toWarehouseId,
@@ -82,6 +88,7 @@ export async function transferStock(
       [actor.tenantId, l.itemId, input.fromWarehouseId, Money.of(l.quantity).neg().toStorage(), unitCost.toStorage(), input.toWarehouseId, t.id, Money.of(l.quantity).toStorage()],
     );
   }
+  await postRevaluation(tx, actor, revaluation, { type: "STOCK_TRANSFER", id: t.id, date: new Date().toISOString().slice(0, 10) });
   await audit(tx, actor, "stock.transferred", "stock_transfer", t.id, input);
   return { transferId: t.id };
 }
@@ -135,8 +142,11 @@ export async function collect(
   actor: Actor,
   input: { clientUuid: string; customerId: string; method: CollectionMethod; amount: string; reference?: string; visitId?: string },
 ) {
+  await lockKey(tx, `client:${actor.tenantId}:${input.clientUuid}`);
   const dup = await maybeOne<{ id: string }>(tx, "SELECT id FROM collections WHERE client_uuid=$1", [input.clientUuid]);
   if (dup) return { collectionId: dup.id, replayed: true, balance: (await customerBalance(tx, input.customerId)).toFixed(2) };
+  await assertVisible(tx, "customers", input.customerId, "العميل");
+  await assertVisible(tx, "visits", input.visitId, "الزيارة");
   await tx.query("SELECT 1 FROM customers WHERE id=$1 FOR UPDATE", [input.customerId]);
   const balance = await customerBalance(tx, input.customerId);
   if (Money.of(input.amount).gt(balance)) {

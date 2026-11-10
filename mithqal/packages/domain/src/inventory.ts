@@ -1,3 +1,4 @@
+import { DomainError } from "./errors.js";
 import { Money, type DecimalInput } from "@mithqal/money";
 
 export interface StockPosition {
@@ -11,8 +12,8 @@ export const EMPTY_POSITION: StockPosition = { quantity: Money.zero(), averageCo
 export function receive(pos: StockPosition, qty: DecimalInput, unitCost: DecimalInput): StockPosition {
   const q = Money.of(qty);
   const c = Money.of(unitCost);
-  if (!q.gt(0)) throw new Error("Received quantity must be positive");
-  if (c.isNegative()) throw new Error("Unit cost cannot be negative");
+  if (!q.gt(0)) throw new DomainError("Received quantity must be positive");
+  if (c.isNegative()) throw new DomainError("Unit cost cannot be negative");
   const newQty = pos.quantity.add(q);
   // When on-hand was negative (sold before receiving), the incoming cost becomes the new average.
   if (!pos.quantity.gt(0)) return { quantity: newQty, averageCost: c.round(4) };
@@ -32,10 +33,10 @@ export interface IssueResult {
  */
 export function issue(pos: StockPosition, qty: DecimalInput, opts: { allowNegative: boolean }): IssueResult {
   const q = Money.of(qty);
-  if (!q.gt(0)) throw new Error("Issued quantity must be positive");
+  if (!q.gt(0)) throw new DomainError("Issued quantity must be positive");
   const newQty = pos.quantity.sub(q);
   if (newQty.isNegative() && !opts.allowNegative) {
-    throw new Error(`Insufficient stock: on hand ${pos.quantity.toFixed(3)}, requested ${q.toFixed(3)}`);
+    throw new DomainError(`Insufficient stock: on hand ${pos.quantity.toFixed(3)}, requested ${q.toFixed(3)}`);
   }
   return {
     position: { quantity: newQty, averageCost: pos.averageCost },
@@ -61,7 +62,7 @@ export interface BatchAllocation {
  */
 export function allocateFefo(batches: Batch[], qty: DecimalInput, today: string): BatchAllocation[] {
   let remaining = Money.of(qty);
-  if (!remaining.gt(0)) throw new Error("Quantity must be positive");
+  if (!remaining.gt(0)) throw new DomainError("Quantity must be positive");
   const usable = batches
     .filter((b) => Money.of(b.quantity).gt(0))
     .filter((b) => b.expiryDate === null || b.expiryDate >= today)
@@ -80,7 +81,7 @@ export function allocateFefo(batches: Batch[], qty: DecimalInput, today: string)
     remaining = remaining.sub(take);
   }
   if (remaining.gt(0)) {
-    throw new Error(`Not enough non-expired stock: short by ${remaining.toFixed(3)}`);
+    throw new DomainError(`Not enough non-expired stock: short by ${remaining.toFixed(3)}`);
   }
   return out;
 }

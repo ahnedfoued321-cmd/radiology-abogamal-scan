@@ -1,3 +1,4 @@
+import { DomainError } from "./errors.js";
 import { Money, type DecimalInput } from "@mithqal/money";
 import { assertBalanced, cr, dr, type JournalDraft } from "./ledger.js";
 
@@ -44,8 +45,9 @@ export function computePayslip(i: PayslipInput): Payslip {
   const employeeContrib = Money.sum(lines.map((l) => l.employee));
   const employerContrib = Money.sum(lines.map((l) => l.employer));
   const deductions = Money.of(i.deductions ?? 0).roundTo(cur);
+  if (deductions.isNegative()) throw new DomainError("Deductions cannot be negative");
   const net = gross.sub(employeeContrib).sub(deductions);
-  if (net.isNegative()) throw new Error("Deductions exceed gross pay");
+  if (net.isNegative()) throw new DomainError("Deductions exceed gross pay");
   return { basic, allowances, gross, contributionBase: base, employeeContrib, employerContrib, deductions, net, lines };
 }
 
@@ -54,13 +56,16 @@ export function computePayslip(i: PayslipInput): Payslip {
  *   Dr Salaries expense (gross) · Dr Employer social insurance expense
  *   Cr Salaries payable (net + other deductions retained) · Cr Social insurance payable (employee + employer)
  */
-export function postPayroll(i: { period: string; gross: DecimalInput; employeeContrib: DecimalInput; employerContrib: DecimalInput }): JournalDraft {
-  const payable = Money.of(i.gross).sub(i.employeeContrib);
+export function postPayroll(i: { period: string; gross: DecimalInput; employeeContrib: DecimalInput; employerContrib: DecimalInput; deductions?: DecimalInput }): JournalDraft {
+  // Deductions (absence, penalties) reduce the salary cost; the payable equals exactly what the bank file pays.
+  const deductions = Money.of(i.deductions ?? 0);
+  if (deductions.isNegative()) throw new DomainError("Deductions cannot be negative");
+  const payable = Money.of(i.gross).sub(i.employeeContrib).sub(deductions);
   const insurance = Money.of(i.employeeContrib).add(i.employerContrib);
   const j: JournalDraft = {
     memo: `Payroll ${i.period}`,
     lines: [
-      dr("SALARIES_EXPENSE", i.gross),
+      dr("SALARIES_EXPENSE", Money.of(i.gross).sub(deductions)),
       dr("SOCIAL_INSURANCE_EXPENSE", i.employerContrib),
       cr("SALARIES_PAYABLE", payable),
       cr("SOCIAL_INSURANCE_PAYABLE", insurance),

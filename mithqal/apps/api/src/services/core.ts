@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { assertBalanced, type AccountRole, type JournalDraft } from "@mithqal/domain";
 import { BusinessError, type Tx } from "../db.js";
+import { Money } from "@mithqal/money";
+import { cr, dr } from "@mithqal/domain";
 
 export interface Actor {
   userId: string;
@@ -54,4 +56,35 @@ export async function postJournal(
     );
   }
   return entryId;
+}
+
+/** Serialize work on a key for the rest of the transaction (idempotency keys, document numbering). */
+export async function lockKey(tx: Tx, key: string): Promise<void> {
+  await tx.query("SELECT pg_advisory_xact_lock(hashtext($1))", [key]);
+}
+
+const VISIBLE_TABLES = new Set(["warehouses", "visits", "customers", "suppliers", "items", "branches"]);
+
+/**
+ * Foreign keys are checked by PostgreSQL without RLS, so an id from another tenant would be accepted.
+ * Every id taken from a request is first proven visible to the current tenant.
+ */
+export async function assertVisible(tx: Tx, table: string, id: string | undefined | null, label = "السجل"): Promise<void> {
+  if (!id) return;
+  if (!VISIBLE_TABLES.has(table)) throw new Error(`assertVisible: table ${table} not allowed`);
+  const r = await tx.query(`SELECT 1 FROM ${table} WHERE id = $1`, [id]);
+  if (!r.rowCount) throw new BusinessError(`${label} غير موجود`);
+}
+
+/**
+ * Keep the Inventory account equal to the stock valuation. `delta` = valuation change not already
+ * booked (e.g. units sold below zero at zero/old cost, later covered by a receipt at a new cost).
+ */
+export async function postRevaluation(tx: Tx, actor: { tenantId: string; userId?: string }, delta: Money, source: { type: string; id: string; date: string }): Promise<void> {
+  const d = delta.round(2);
+  if (d.isZero()) return;
+  const lines = d.isNegative()
+    ? [dr("COST_OF_GOODS_SOLD", d.abs()), cr("INVENTORY", d.abs())]
+    : [dr("INVENTORY", d), cr("COST_OF_GOODS_SOLD", d)];
+  await postJournal(tx, actor, { memo: `Inventory revaluation (${source.type})`, lines }, { type: `${source.type}_REVALUATION`, id: source.id, date: source.date });
 }

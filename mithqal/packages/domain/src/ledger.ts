@@ -1,3 +1,4 @@
+import { DomainError } from "./errors.js";
 import { Money, type DecimalInput } from "@mithqal/money";
 
 /** System account roles. Each tenant maps roles to its own chart-of-accounts codes. */
@@ -42,15 +43,15 @@ export function cr(role: AccountRole, amount: DecimalInput, memo?: string): Jour
 /** Enforce double-entry: non-negative sides, one side per line, debits == credits, no empty journal. */
 export function assertBalanced(j: JournalDraft): void {
   const lines = j.lines.filter((l) => !(l.debit.isZero() && l.credit.isZero()));
-  if (lines.length < 2) throw new Error("Journal must have at least two non-zero lines");
+  if (lines.length < 2) throw new DomainError("Journal must have at least two non-zero lines");
   for (const l of lines) {
-    if (l.debit.isNegative() || l.credit.isNegative()) throw new Error("Journal amounts must be non-negative");
-    if (!l.debit.isZero() && !l.credit.isZero()) throw new Error("A journal line cannot have both debit and credit");
+    if (l.debit.isNegative() || l.credit.isNegative()) throw new DomainError("Journal amounts must be non-negative");
+    if (!l.debit.isZero() && !l.credit.isZero()) throw new DomainError("A journal line cannot have both debit and credit");
   }
   const d = Money.sum(lines.map((l) => l.debit));
   const c = Money.sum(lines.map((l) => l.credit));
   if (!d.round(4).eq(c.round(4))) {
-    throw new Error(`Unbalanced journal: debit ${d.toFixed(4)} != credit ${c.toFixed(4)}`);
+    throw new DomainError(`Unbalanced journal: debit ${d.toFixed(4)} != credit ${c.toFixed(4)}`);
   }
 }
 
@@ -94,7 +95,7 @@ export function postSale(i: SalePostingInput): JournalDraft {
   const gross = Money.of(i.totalGross);
   const paid = Money.sum(i.payments.map((p) => p.amount));
   if (!paid.round(2).eq(gross.round(2))) {
-    throw new Error(`Payments ${paid.toFixed()} do not match invoice total ${gross.toFixed()}`);
+    throw new DomainError(`Payments ${paid.toFixed()} do not match invoice total ${gross.toFixed()}`);
   }
   const roleFor: Record<PaymentMethod, AccountRole> = {
     CASH: "CASH",
@@ -131,14 +132,16 @@ export function postSaleReturn(i: SalePostingInput): JournalDraft {
  * Posting rule: goods received with supplier bill.
  *   Dr Inventory (net) · Dr VAT input (tax) · Cr Accounts payable / Cash (gross)
  */
-export function postPurchase(i: { reference: string; net: DecimalInput; tax: DecimalInput; paidCash?: boolean }): JournalDraft {
+export function postPurchase(i: { reference: string; net: DecimalInput; tax: DecimalInput; paidCash?: boolean; openingStock?: boolean }): JournalDraft {
   const gross = Money.of(i.net).add(i.tax);
+  // Opening stock (no supplier, not paid) is capital already in the business: no VAT, credit opening equity.
+  const credit: AccountRole = i.openingStock ? "OPENING_BALANCE_EQUITY" : i.paidCash ? "CASH" : "ACCOUNTS_PAYABLE";
   const j = compact({
-    memo: `Purchase ${i.reference}`,
+    memo: `${i.openingStock ? "Opening stock" : "Purchase"} ${i.reference}`,
     lines: [
       dr("INVENTORY", i.net),
-      dr("VAT_INPUT", i.tax),
-      cr(i.paidCash ? "CASH" : "ACCOUNTS_PAYABLE", gross),
+      dr("VAT_INPUT", i.openingStock ? 0 : i.tax),
+      cr(credit, i.openingStock ? i.net : gross),
     ],
   });
   assertBalanced(j);

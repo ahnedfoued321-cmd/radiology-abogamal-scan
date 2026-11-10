@@ -30,7 +30,7 @@ const zatca = new RoutingClient({
 
 // E-invoice reporting loop (simplified invoices must reach ZATCA within 24h).
 const timer = setInterval(() => {
-  reportPending(ownerDb, zatca).catch((e) => app.log.error(e, "e-invoice reporting failed"));
+  reportPending(ownerDb, zatca, 50, zatca.authorities).catch((e) => app.log.error(e, "e-invoice reporting failed"));
 }, 15_000);
 
 const shutdown = async () => {

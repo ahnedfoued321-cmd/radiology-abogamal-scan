@@ -1,7 +1,7 @@
 import { Money } from "@mithqal/money";
 import { postSupplierPayment, suggestReorder } from "@mithqal/domain";
 import { BusinessError, maybeOne, one, type Tx } from "../db.js";
-import { audit, emit, postJournal, type Actor } from "./core.js";
+import { assertVisible, audit, emit, lockKey, postJournal, type Actor } from "./core.js";
 import { receiveGoods } from "./inventory.js";
 
 /** Accounts payable to a supplier: unpaid receipts (gross) minus payments. */
@@ -43,8 +43,10 @@ export async function createPurchaseOrder(
   actor: Actor,
   input: { supplierId: string; warehouseId: string; note?: string; lines: { itemId: string; quantity: string; unitCost: string }[] },
 ) {
-  const sup = await maybeOne(tx, "SELECT 1 FROM suppliers WHERE id=$1", [input.supplierId]);
-  if (!sup) throw new BusinessError("المورد غير موجود");
+  await assertVisible(tx, "suppliers", input.supplierId, "المورد");
+  await assertVisible(tx, "warehouses", input.warehouseId, "المستودع");
+  for (const l of input.lines) await assertVisible(tx, "items", l.itemId, "الصنف");
+  await lockKey(tx, `po-number:${actor.tenantId}`);
   const n = (await one<{ n: string }>(tx, "SELECT count(*) AS n FROM purchase_orders")).n;
   const number = `PO-${String(Number(n) + 1).padStart(5, "0")}`;
   const po = await one<{ id: string }>(
@@ -116,6 +118,7 @@ export async function paySupplier(
   actor: Actor,
   input: { clientUuid: string; supplierId: string; method: "CASH" | "BANK_TRANSFER" | "CHEQUE"; amount: string; reference?: string },
 ) {
+  await lockKey(tx, `client:${actor.tenantId}:${input.clientUuid}`);
   const dup = await maybeOne<{ id: string }>(tx, "SELECT id FROM supplier_payments WHERE client_uuid=$1", [input.clientUuid]);
   if (dup) return { paymentId: dup.id, replayed: true, balance: (await supplierBalance(tx, input.supplierId)).toFixed(2) };
   await tx.query("SELECT 1 FROM suppliers WHERE id=$1 FOR UPDATE", [input.supplierId]);

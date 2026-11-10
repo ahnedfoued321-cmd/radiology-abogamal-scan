@@ -6,9 +6,10 @@ import bcrypt from "bcryptjs";
 import { z, ZodError } from "zod";
 import type { Config } from "./config.js";
 import { Money } from "@mithqal/money";
+import { DomainError } from "@mithqal/domain";
 import { entitlements, PlanError, requireCapacity, requireModule, type Module } from "./services/licensing.js";
 import { BusinessError, maybeOne, withTenant, type Db } from "./db.js";
-import { audit, type Actor } from "./services/core.js";
+import { audit, lockKey, type Actor } from "./services/core.js";
 import { createTerminal, onboard } from "./services/onboarding.js";
 import { receiveGoods } from "./services/inventory.js";
 import { createSale, getInvoice, refundSale } from "./services/sales.js";
@@ -30,7 +31,7 @@ declare module "@fastify/jwt" {
   }
 }
 
-const money = z.string().regex(/^-?\d+(\.\d{1,4})?$/, "amount must be a decimal string");
+const money = z.string().regex(/^\d+(\.\d{1,4})?$/, "amount must be a non-negative decimal string");
 const qty = z.string().regex(/^\d+(\.\d{1,4})?$/, "quantity must be a positive decimal string");
 const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 
@@ -62,6 +63,7 @@ const schemas = {
   }),
   receipt: z.object({
     warehouseId: z.string().uuid(),
+    supplierId: z.string().uuid().optional(),
     reference: z.string().min(1),
     paidCash: z.boolean().optional(),
     date: date.optional(),
@@ -101,11 +103,14 @@ export function buildApp(db: Db, config: Config, platformDb?: Db, llm?: LlmClien
     if (err instanceof PlanError) {
       return reply.status(402).send({ error: "PLAN_LIMIT", message: err.message, upgradeTo: err.upgradeTo ?? null });
     }
-    if (err instanceof BusinessError || code === 404 || code === 401 || code === 403) {
+    if (err instanceof DomainError) return reply.status(422).send({ error: "BUSINESS_RULE", message: err.message });
+    if (err instanceof BusinessError || code === 404 || code === 401 || code === 403 || code === 429) {
       return reply.status(code ?? 422).send({ error: err.name, message: err.message });
     }
     const pg = err as { code?: string; message: string };
     if (pg.code === "23505") return reply.status(409).send({ error: "CONFLICT", message: "Duplicate record" });
+    if (pg.code === "23514" || pg.code === "23503") return reply.status(422).send({ error: "INVALID", message: "Invalid value or reference" });
+    if (pg.code === "40P01" || pg.code === "40001") return reply.status(409).send({ error: "RETRY", message: "Busy — please retry" });
     app.log.error(err);
     return reply.status(500).send({ error: "INTERNAL", message: "Unexpected error" });
   });
@@ -116,16 +121,29 @@ export function buildApp(db: Db, config: Config, platformDb?: Db, llm?: LlmClien
     } catch {
       return reply.status(401).send({ error: "UNAUTHORIZED", message: "سجّل الدخول أولًا" });
     }
+    // Tokens live 12h: re-check that the user still exists, is active and still has this role.
+    const u = await maybeOne<{ tenant_id: string; role: Role; active: boolean }>(db, "SELECT * FROM auth_user_status($1)", [req.user.sub]);
+    if (!u || !u.active || u.tenant_id !== req.user.tid) {
+      return reply.status(401).send({ error: "UNAUTHORIZED", message: "انتهت صلاحية الجلسة — سجّل الدخول مرة أخرى" });
+    }
+    req.user.role = u.role;
     if (roles.length && !roles.includes(req.user.role)) {
       return reply.status(403).send({ error: "FORBIDDEN", message: "ليس لديك صلاحية لهذه العملية" });
     }
   };
   const actorOf = (req: FastifyRequest): Actor => ({ userId: req.user.sub, tenantId: req.user.tid, role: req.user.role });
-  const T = <R>(req: FastifyRequest, fn: Parameters<typeof withTenant<R>>[2]) => withTenant<R>(db, req.user.tid, fn);
+  const T = <R>(req: FastifyRequest, fn: Parameters<typeof withTenant<R>>[2]) =>
+    withTenant<R>(db, req.user.tid, async (tx) => {
+      if (req.method !== "GET") {
+        const t = await tx.query<{ status: string }>("SELECT status FROM tenants");
+        if (t.rows[0]?.status === "suspended") throw new PlanError("الحساب موقوف — جدّد الاشتراك للمتابعة (القراءة متاحة)");
+      }
+      return fn(tx);
+    });
   const today = () => new Date().toISOString().slice(0, 10);
   /** Tenant transaction that first checks the plan includes `module`. */
   const TM = <R>(req: FastifyRequest, module: Module, fn: Parameters<typeof withTenant<R>>[2]) =>
-    withTenant<R>(db, req.user.tid, async (tx) => {
+    T<R>(req, async (tx) => {
       await requireModule(tx, module);
       return fn(tx);
     });
@@ -449,6 +467,7 @@ export function buildApp(db: Db, config: Config, platformDb?: Db, llm?: LlmClien
       const company = (await tx.query<{ id: string; country: string }>("SELECT id, country FROM companies LIMIT 1")).rows[0]!;
       const br = (await tx.query<{ id: string }>("INSERT INTO branches (tenant_id, company_id, name) VALUES ($1,$2,$3) RETURNING id", [req.user.tid, company.id, b.name])).rows[0]!;
       const whId = (await tx.query<{ id: string }>("INSERT INTO warehouses (tenant_id, branch_id, name) VALUES ($1,$2,$3) RETURNING id", [req.user.tid, br.id, `مستودع ${b.name}`])).rows[0]!.id;
+      await lockKey(tx, `terminal-number:${req.user.tid}`);
       const n = (await tx.query<{ n: number }>("SELECT count(*)::int AS n FROM pos_terminals WHERE prefix LIKE 'POS%'")).rows[0]!.n;
       const terminalId = await createTerminal(tx, req.user.tid, br.id, whId, `كاشير ${b.name}`, `POS${n + 1}`, company.country === "EG" ? "" : undefined);
       await audit(tx, actorOf(req), "branch.created", "branch", br.id, { name: b.name });
@@ -703,17 +722,16 @@ export function buildApp(db: Db, config: Config, platformDb?: Db, llm?: LlmClien
   // ───── AI assistant «ذهب» & insights ─────
   app.post("/v1/assistant/ask", { preHandler: auth("owner", "accountant") }, async (req) => {
     const { question } = z.object({ question: z.string().min(1).max(500) }).parse(req.body);
-    return TM(req, "assistant", async (tx) => {
-      if (llm) {
-        try {
-          const r = await askLlm(llm, tx, question);
-          if (r) return { intent: "LLM", answer: r.answer, toolsUsed: r.toolsUsed, engine: "llm" };
-        } catch (e) {
-          app.log.warn({ err: (e as Error).message }, "assistant LLM failed; falling back to rules");
-        }
+    await TM(req, "assistant", async () => undefined); // plan check only
+    if (llm) {
+      try {
+        const r = await askLlm(llm, (fn) => withTenant(db, req.user.tid, fn), question);
+        if (r) return { intent: "LLM", answer: r.answer, toolsUsed: r.toolsUsed, engine: "llm" };
+      } catch (e) {
+        app.log.warn({ err: (e as Error).message }, "assistant LLM failed; falling back to rules");
       }
-      return { ...(await ask(tx, question)), engine: "rules" };
-    });
+    }
+    return T(req, async (tx) => ({ ...(await ask(tx, question)), engine: "rules" }));
   });
 
   app.get("/v1/insights/cashiers", { preHandler: auth("owner") }, async (req) => {
