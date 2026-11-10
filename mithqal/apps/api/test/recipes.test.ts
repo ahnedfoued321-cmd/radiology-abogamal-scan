@@ -111,6 +111,27 @@ describe("F&B recipes: live cost per cup", () => {
   });
 });
 
+describe("kitchen / barista display", () => {
+  it("routes prepared drinks to the KDS and tracks ready → served", async () => {
+    const s = await call("POST", "/v1/pos/sales", token, {
+      clientUuid: randomUUID(), terminalId, lines: [{ itemId: ids.LATTE, quantity: "2" }, { itemId: ids.ESP, quantity: "1" }],
+      payments: [{ method: "CASH", amount: "41.40" }],
+    });
+    expect(s.status).toBe(201);
+    let t = await call("GET", "/v1/kds/tickets", token);
+    const ticket = t.body.find((x: any) => x.invoice_id === s.body.id);
+    expect(ticket.status).toBe("NEW");
+    expect(ticket.items).toEqual([{ name: "لاتيه", quantity: 2 }, { name: "إسبريسو", quantity: 1 }]);
+    expect((await call("POST", `/v1/kds/tickets/${s.body.id}/status`, token, { status: "READY" })).body.status).toBe("READY");
+    await call("POST", `/v1/kds/tickets/${s.body.id}/status`, token, { status: "SERVED" });
+    t = await call("GET", "/v1/kds/tickets", token);
+    expect(t.body.find((x: any) => x.invoice_id === s.body.id)).toBeUndefined();
+    expect((await call("POST", `/v1/kds/tickets/${s.body.id}/status`, token, { status: "READY" })).status).toBe(422);
+    const prep = await call("GET", "/v1/reports/prep-times", token);
+    expect(prep.body.tickets).toBeGreaterThanOrEqual(1);
+  });
+});
+
 describe("pharmacy refunds restock the original batches", () => {
   it("returns sold units to the same batch and keeps GL = stock", async () => {
     const drug = (await call("POST", "/v1/items", token, { sku: "AMOX", nameAr: "أموكسيسيلين", price: "20.00", taxPercent: "0", trackBatches: true })).body;

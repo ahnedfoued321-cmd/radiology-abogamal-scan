@@ -188,6 +188,10 @@ export async function createSale(tx: Tx, actor: Actor, input: SaleInput) {
     totals: { net: priced.totalNet, tax: priced.totalTax, gross: priced.totalGross },
   });
 
+  // Prepared menu items (made to order, not shelf stock) go to the kitchen / barista display.
+  if (priced.lines.some((l) => !itemMap.get(l.itemId)!.track_stock)) {
+    await tx.query("INSERT INTO kds_tickets (invoice_id, tenant_id) VALUES ($1,$2)", [invoiceId, actor.tenantId]);
+  }
   await emit(tx, actor.tenantId, "InvoicePosted", { invoiceId, number, kind, total: priced.totalGross.toFixed(2) });
   await audit(tx, actor, "sale.created", "sales_invoice", invoiceId, { number, total: priced.totalGross.toFixed(2) });
   return { ...(await getInvoice(tx, invoiceId)), replayed: false };

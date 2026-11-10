@@ -649,6 +649,57 @@ export function buildApp(db: Db, config: Config, platformDb?: Db, llm?: LlmClien
     return T(req, (tx) => expiringBatches(tx, today(), days));
   });
 
+  // ───── Kitchen / barista display ─────
+  app.get("/v1/kds/tickets", { preHandler: auth("owner", "cashier") }, async (req) =>
+    T(req, async (tx) => {
+      const rows = await tx.query<{ invoice_id: string; number: string; status: string; created_at: Date; seconds: number }>(
+        `SELECT k.invoice_id, i.number, k.status, k.created_at, extract(epoch FROM now() - k.created_at)::int AS seconds
+           FROM kds_tickets k JOIN sales_invoices i ON i.id = k.invoice_id
+          WHERE k.status <> 'SERVED' AND k.created_at > now() - interval '12 hours'
+          ORDER BY k.created_at`,
+      );
+      const lines = await tx.query<{ invoice_id: string; name: string; quantity: string }>(
+        `SELECT l.invoice_id, l.name, l.quantity FROM sales_invoice_lines l JOIN items it ON it.id = l.item_id
+          WHERE l.invoice_id = ANY($1) AND NOT it.track_stock ORDER BY l.line_no`,
+        [rows.rows.map((r) => r.invoice_id)],
+      );
+      return rows.rows.map((r) => ({
+        ...r,
+        items: lines.rows.filter((l) => l.invoice_id === r.invoice_id).map((l) => ({ name: l.name, quantity: Number(l.quantity) })),
+      }));
+    }),
+  );
+
+  app.post("/v1/kds/tickets/:id/status", { preHandler: auth("owner", "cashier") }, async (req) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
+    const { status } = z.object({ status: z.enum(["READY", "SERVED"]) }).parse(req.body);
+    return T(req, async (tx) => {
+      const r = await tx.query(
+        `UPDATE kds_tickets SET status=$1,
+                ready_at = CASE WHEN $1='READY' THEN now() ELSE coalesce(ready_at, now()) END,
+                served_at = CASE WHEN $1='SERVED' THEN now() ELSE served_at END
+          WHERE invoice_id=$2 AND status <> 'SERVED' RETURNING invoice_id, status`,
+        [status, id],
+      );
+      if (!r.rowCount) throw new BusinessError("الطلب غير موجود أو تم تسليمه");
+      return r.rows[0];
+    });
+  });
+
+  app.get("/v1/reports/prep-times", { preHandler: auth("owner") }, async (req) => {
+    const { day } = z.object({ day: date.optional() }).parse(req.query);
+    return T(req, async (tx) => {
+      const r = await tx.query<{ tickets: number; avg_seconds: number | null; p90_seconds: number | null }>(
+        `SELECT count(*)::int AS tickets,
+                avg(extract(epoch FROM ready_at - created_at))::int AS avg_seconds,
+                (percentile_cont(0.9) WITHIN GROUP (ORDER BY extract(epoch FROM ready_at - created_at)))::int AS p90_seconds
+           FROM kds_tickets WHERE ready_at IS NOT NULL AND created_at::date = $1`,
+        [day ?? today()],
+      );
+      return r.rows[0];
+    });
+  });
+
   // ───── AI assistant «ذهب» & insights ─────
   app.post("/v1/assistant/ask", { preHandler: auth("owner", "accountant") }, async (req) => {
     const { question } = z.object({ question: z.string().min(1).max(500) }).parse(req.body);
