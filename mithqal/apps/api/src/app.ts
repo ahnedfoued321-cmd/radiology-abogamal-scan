@@ -17,6 +17,7 @@ import { accountStatement, balanceSheet, dailySummary, expiringBatches, incomeSt
 import { ask, cashierInsights } from "./services/assistant.js";
 import { bankFile, createEmployee, expiringDocuments, payrollRun, runPayroll } from "./services/hr.js";
 import { askLlm, type LlmClient } from "./services/assistant-llm.js";
+import { onboardTerminal } from "./services/zatca-onboarding.js";
 import {
   approvePurchaseOrder, createPurchaseOrder, getPurchaseOrder, paySupplier, receivePurchaseOrder, reorderSuggestions, supplierBalance,
 } from "./services/purchasing.js";
@@ -92,7 +93,7 @@ const schemas = {
   period: z.object({ from: date, to: date }),
 };
 
-export function buildApp(db: Db, config: Config, platformDb?: Db, llm?: LlmClient): FastifyInstance {
+export function buildApp(db: Db, config: Config, platformDb?: Db, llm?: LlmClient, zatcaFetch: typeof fetch = fetch): FastifyInstance {
   const app = Fastify({ logger: process.env.NODE_ENV !== "test" });
   app.register(cors, { origin: true });
   app.register(jwt, { secret: config.jwtSecret, sign: { expiresIn: "12h" } });
@@ -530,6 +531,22 @@ export function buildApp(db: Db, config: Config, platformDb?: Db, llm?: LlmClien
     const { days } = z.object({ days: z.coerce.number().int().min(1).max(365).default(60) }).parse(req.query);
     return TM(req, "hr", (tx) => expiringDocuments(tx, today(), days));
   });
+
+  // ───── ZATCA device onboarding ─────
+  app.post("/v1/terminals/:id/zatca/onboard", { preHandler: auth("owner") }, async (req) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
+    const b = z.object({ otp: z.string().regex(/^\d{6}$/, "OTP must be 6 digits"), env: z.enum(["sandbox", "simulation", "production"]).default("sandbox") }).parse(req.body);
+    await T(req, async (tx) => {
+      if (!(await maybeOne(tx, "SELECT 1 FROM pos_terminals WHERE id=$1", [id]))) throw new BusinessError("نقطة البيع غير موجودة");
+    });
+    return onboardTerminal(db, actorOf(req), id, b.otp, b.env, zatcaFetch);
+  });
+
+  app.get("/v1/terminals", { preHandler: auth("owner") }, async (req) =>
+    T(req, async (tx) =>
+      (await tx.query("SELECT id, name, prefix, zatca_status, zatca_env, zatca_onboarded_at, zatca_last_error FROM pos_terminals ORDER BY prefix")).rows,
+    ),
+  );
 
   // ───── Purchasing ─────
   app.post("/v1/suppliers", { preHandler: auth("owner", "storekeeper", "accountant") }, async (req, reply) => {

@@ -36,7 +36,8 @@ const signup = await call<{ token: string; warehouseId: string; terminalId: stri
   businessNameEn: "Al Rayhan Cafe",
   country: "SA",
   industry: "cafe",
-  vatNumber: "310122393500003",
+  // ZATCA's developer sandbox certificate is fixed to this test VAT number (see README → ZATCA)
+  vatNumber: "399999999900003",
   crNumber: "1010010000",
   address: { street: "طريق الملك فهد", buildingNumber: "1234", district: "العليا", city: "الرياض", postalCode: "12211" },
   owner: { fullName: "عبدالله المالك", email: "demo@mithqal.app", password: "Mithqal#2026" },

@@ -65,6 +65,7 @@ export interface UblInvoice {
     payable: string;
   };
   billingReference?: string; // original invoice number for credit/debit notes
+  supplyDate?: string; // KSA-5, YYYY-MM-DD (defaults to issue date for standard invoices)
   reason?: string; // required for credit/debit notes
 }
 
@@ -74,13 +75,13 @@ const TYPE_CODES: Record<DocumentType, string> = {
   DEBIT_NOTE: "383",
 };
 
+/** Text-node escaping that matches XML C14N output (quotes stay literal), so our hash equals ZATCA's. */
 export function escapeXml(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;");
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+export function escapeAttr(s: string): string {
+  return escapeXml(s).replace(/"/g, "&quot;");
 }
 
 const e = escapeXml;
@@ -141,7 +142,7 @@ function line(l: UblLine, c: string): string {
   return (
     `<cac:InvoiceLine>` +
     `<cbc:ID>${l.id}</cbc:ID>` +
-    `<cbc:InvoicedQuantity unitCode="${e(l.unitCode ?? "PCE")}">${e(l.quantity)}</cbc:InvoicedQuantity>` +
+    `<cbc:InvoicedQuantity unitCode="${escapeAttr(l.unitCode ?? "PCE")}">${e(l.quantity)}</cbc:InvoicedQuantity>` +
     `<cbc:LineExtensionAmount currencyID="${c}">${e(l.lineNet)}</cbc:LineExtensionAmount>` +
     `<cac:TaxTotal><cbc:TaxAmount currencyID="${c}">${e(l.taxAmount)}</cbc:TaxAmount>` +
     `<cbc:RoundingAmount currencyID="${c}">${gross.toFixed(2)}</cbc:RoundingAmount></cac:TaxTotal>` +
@@ -160,7 +161,7 @@ const NS =
   `xmlns:ext="urn:oasis:names:specification:ubl:schema:xsd:CommonExtensionComponents-2"`;
 
 /** Build the hashable XML and a function that inserts QR + signature into the full document. */
-export function buildUblInvoice(inv: UblInvoice): { hashable: string; withQr: (qrBase64: string, signedPropsXml?: string) => string } {
+export function buildUblInvoice(inv: UblInvoice): { hashable: string; withQr: (qrBase64: string, signatureExtensionXml?: string) => string } {
   if (inv.lines.length === 0) throw new Error("Invoice must have at least one line");
   if (inv.documentType !== "INVOICE" && (!inv.billingReference || !inv.reason)) {
     throw new Error("Credit/debit notes require billingReference and reason");
@@ -168,7 +169,8 @@ export function buildUblInvoice(inv: UblInvoice): { hashable: string; withQr: (q
   if (inv.kind === "STANDARD" && !inv.buyer) throw new Error("Standard (B2B) tax invoices require a buyer");
   const c = inv.currency;
   const typeName = inv.kind === "SIMPLIFIED" ? "0200000" : "0100000";
-  const profile = inv.kind === "SIMPLIFIED" ? "reporting:1.0" : "clearance:1.0";
+  // ZATCA requires BT-23 = "reporting:1.0" for every invoice type (clearance vs reporting is decided by KSA-2).
+  const profile = "reporting:1.0";
 
   const head =
     `<cbc:ProfileID>${profile}</cbc:ProfileID>` +
@@ -189,7 +191,10 @@ export function buildUblInvoice(inv: UblInvoice): { hashable: string; withQr: (q
 
   const body =
     party(inv.seller, "AccountingSupplierParty") +
-    (inv.buyer ? party(inv.buyer, "AccountingCustomerParty") : "") +
+    // UBL requires the element even for anonymous B2C buyers
+    (inv.buyer ? party(inv.buyer, "AccountingCustomerParty") : `<cac:AccountingCustomerParty></cac:AccountingCustomerParty>`) +
+    // BR-KSA-15: standard tax invoices carry the supply date (KSA-5)
+    (inv.kind === "STANDARD" ? `<cac:Delivery><cbc:ActualDeliveryDate>${e(inv.supplyDate ?? inv.issueDate)}</cbc:ActualDeliveryDate></cac:Delivery>` : "") +
     `<cac:PaymentMeans><cbc:PaymentMeansCode>${e(inv.paymentMeansCode)}</cbc:PaymentMeansCode>` +
     (inv.reason ? `<cbc:InstructionNote>${e(inv.reason)}</cbc:InstructionNote>` : "") +
     `</cac:PaymentMeans>` +
@@ -207,11 +212,14 @@ export function buildUblInvoice(inv: UblInvoice): { hashable: string; withQr: (q
 
   const hashable = `<Invoice ${NS}>${head}${body}</Invoice>`;
 
-  const withQr = (qrBase64: string, signedPropsXml = ""): string =>
+  const withQr = (qrBase64: string, signatureExtensionXml?: string): string =>
     `<?xml version="1.0" encoding="UTF-8"?>` +
     `<Invoice ${NS}>` +
-    `<ext:UBLExtensions><ext:UBLExtension><ext:ExtensionURI>urn:oasis:names:specification:ubl:dsig:enveloped:xades</ext:ExtensionURI>` +
-    `<ext:ExtensionContent>${signedPropsXml}</ext:ExtensionContent></ext:UBLExtension></ext:UBLExtensions>` +
+    (signatureExtensionXml
+      ? `<ext:UBLExtensions>${signatureExtensionXml}</ext:UBLExtensions>`
+      : // device not onboarded with ZATCA yet: unsigned placeholder (dev/test only)
+        `<ext:UBLExtensions><ext:UBLExtension><ext:ExtensionURI>urn:oasis:names:specification:ubl:dsig:enveloped:xades</ext:ExtensionURI>` +
+        `<ext:ExtensionContent></ext:ExtensionContent></ext:UBLExtension></ext:UBLExtensions>`) +
     head +
     `<cac:AdditionalDocumentReference><cbc:ID>QR</cbc:ID><cac:Attachment>` +
     `<cbc:EmbeddedDocumentBinaryObject mimeCode="text/plain">${qrBase64}</cbc:EmbeddedDocumentBinaryObject>` +

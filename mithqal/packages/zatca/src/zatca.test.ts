@@ -108,6 +108,12 @@ describe("UBL", () => {
     expect(hashable).toContain("A&amp;B&lt;1&gt;");
   });
 
+  it("uses reporting:1.0 for every type and adds the supply date on standard invoices", () => {
+    const std = buildUblInvoice({ ...sample("X"), kind: "STANDARD", buyer: { name: "B", vatNumber: "311111111111113" }, icv: 1, pih: INITIAL_PIH });
+    expect(std.hashable).toContain("<cbc:ProfileID>reporting:1.0</cbc:ProfileID>");
+    expect(std.hashable).toContain("<cac:Delivery><cbc:ActualDeliveryDate>2026-11-10</cbc:ActualDeliveryDate></cac:Delivery>");
+  });
+
   it("marks simplified invoices with reporting profile and 0200000", () => {
     const { hashable } = buildUblInvoice({ ...sample("X"), icv: 1, pih: INITIAL_PIH });
     expect(hashable).toContain("<cbc:ProfileID>reporting:1.0</cbc:ProfileID>");

@@ -1,10 +1,12 @@
 import { encodeTlvBase64, type TlvField } from "./tlv.js";
 import { buildUblInvoice, type UblInvoice } from "./ubl.js";
 import { INITIAL_PIH, invoiceHash, publicKeyDer, signInvoiceHash } from "./crypto.js";
+import { certificateFromCsid, ublSignatureExtension } from "./xades.js";
 
 export * from "./tlv.js";
 export * from "./ubl.js";
 export * from "./crypto.js";
+export * from "./xades.js";
 
 /** Per-device (EGS unit / POS terminal) e-invoice chain state. ZATCA requires ICV + PIH continuity per device. */
 export interface DeviceChainState {
@@ -60,7 +62,7 @@ export interface IssueInput extends Omit<UblInvoice, "icv" | "pih"> {
 export function issueInvoice(
   input: IssueInput,
   chain: DeviceChainState,
-  keys: { privateKeyPem: string; publicKeyPem: string; certificateSignature?: Uint8Array },
+  keys: { privateKeyPem: string; publicKeyPem: string; certificateSignature?: Uint8Array; /** ZATCA CSID token or base64 certificate */ certificate?: string },
 ): SignedInvoiceResult {
   const icv = chain.icv + 1;
   const pih = chain.lastHash;
@@ -69,29 +71,35 @@ export function issueInvoice(
   const hash = invoiceHash(doc.hashable);
   const signature = signInvoiceHash(hash, keys.privateKeyPem);
 
+  const cert = keys.certificate ? certificateFromCsid(keys.certificate) : null;
+  // With a ZATCA certificate the QR timestamp mirrors the invoice's IssueDate/IssueTime.
+  const qrTimestamp = cert ? `${ubl.issueDate}T${ubl.issueTime}` : timestamp;
   const fields: TlvField[] = [
     ...phase1Fields({
       sellerName: ubl.seller.name,
       vatNumber: ubl.seller.vatNumber ?? "",
-      timestamp,
+      timestamp: qrTimestamp,
       total: ubl.totals.taxInclusive,
       vatTotal: ubl.totals.taxTotal,
     }),
     { tag: 6, value: hash },
     { tag: 7, value: signature },
-    { tag: 8, value: publicKeyDer(keys.publicKeyPem) },
+    { tag: 8, value: cert ? cert.publicKeyDer : publicKeyDer(keys.publicKeyPem) },
   ];
-  if (ubl.kind === "SIMPLIFIED" && keys.certificateSignature) {
-    fields.push({ tag: 9, value: keys.certificateSignature });
-  }
+  const certSig = cert?.signature ?? keys.certificateSignature;
+  if (ubl.kind === "SIMPLIFIED" && certSig) fields.push({ tag: 9, value: certSig });
   const qr = encodeTlvBase64(fields);
+  const extension = cert
+    ? ublSignatureExtension({ invoiceHash: hash, signatureValue: signature, signingTime: `${ubl.issueDate}T${ubl.issueTime}`, cert })
+    : undefined;
   return {
     icv,
     pih,
     hash,
     signature,
     qr,
-    xml: doc.withQr(qr),
+    xml: doc.withQr(qr, extension),
     nextChain: { icv, lastHash: hash },
   };
 }
+export * from "./api.js";

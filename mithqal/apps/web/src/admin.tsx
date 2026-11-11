@@ -5,7 +5,7 @@ const n = (v: string | number) => Number(v).toLocaleString("ar-SA", { minimumFra
 const roleAr: Record<string, string> = { owner: "مالك", accountant: "محاسب", cashier: "كاشير", storekeeper: "أمين مخزن", sales_rep: "مندوب" };
 const statusAr: Record<string, string> = { DRAFT: "مسودة", APPROVED: "معتمد", PARTIAL: "استلام جزئي", RECEIVED: "مستلم", CANCELLED: "ملغي" };
 
-type Section = "subscription" | "team" | "customers" | "purchasing" | "menu" | "payroll";
+type Section = "subscription" | "team" | "customers" | "purchasing" | "menu" | "payroll" | "zatca";
 
 export function Admin({ me, toast }: { me: Me; toast: (s: string) => void }) {
   const [section, setSection] = useState<Section>("purchasing");
@@ -15,6 +15,7 @@ export function Admin({ me, toast }: { me: Me; toast: (s: string) => void }) {
     ["customers", "العملاء والمستحقات"],
     ["team", "الفريق والمناديب"],
     ["payroll", "الرواتب"],
+    ["zatca", "ربط ZATCA"],
     ["subscription", "الباقة"],
   ];
   return (
@@ -30,6 +31,7 @@ export function Admin({ me, toast }: { me: Me; toast: (s: string) => void }) {
       {section === "team" && <Team toast={toast} />}
       {section === "subscription" && <Subscription />}
       {section === "payroll" && <Payroll toast={toast} />}
+      {section === "zatca" && <ZatcaDevices toast={toast} />}
     </div>
   );
 }
@@ -398,6 +400,75 @@ function Payroll({ toast }: { toast: (s: string) => void }) {
           <button className="btn primary">إضافة</button>
         </form>
       </div>
+    </>
+  );
+}
+
+/* ───── ZATCA device onboarding ───── */
+
+interface Terminal { id: string; name: string; prefix: string; zatca_status: string; zatca_env: string | null; zatca_onboarded_at: string | null; zatca_last_error: string | null }
+interface OnboardResult { onboarded: boolean; checks: { type: string; result: string; errors: string[] }[] }
+
+function ZatcaDevices({ toast }: { toast: (s: string) => void }) {
+  const [rows, reload] = useLoad<Terminal[]>("/v1/terminals");
+  const [env, setEnv] = useState<"sandbox" | "simulation" | "production">("sandbox");
+  const [busy, setBusy] = useState<string | null>(null);
+  const [result, setResult] = useState<OnboardResult | null>(null);
+  async function onboard(id: string) {
+    const otp = window.prompt(env === "sandbox" ? "رمز OTP (بيئة الاختبار: 123345)" : "رمز OTP من بوابة فاتورة (fatoora.zatca.gov.sa)", env === "sandbox" ? "123345" : "");
+    if (!otp) return;
+    setBusy(id);
+    try {
+      const r = await api<OnboardResult>("POST", `/v1/terminals/${id}/zatca/onboard`, { otp, env });
+      setResult(r);
+      toast(r.onboarded ? "تم ربط الجهاز مع ZATCA ✓" : "لم تنجح فحوصات الامتثال — راجع التفاصيل");
+      reload();
+    } catch (err) {
+      toast((err as Error).message);
+      reload();
+    } finally {
+      setBusy(null);
+    }
+  }
+  const envAr: Record<string, string> = { sandbox: "بيئة اختبار المطورين", simulation: "بيئة المحاكاة", production: "الإنتاج (فاتورة)" };
+  return (
+    <>
+      <div className="panel">
+        <h3>ربط أجهزة نقاط البيع مع هيئة الزكاة والضريبة والجمارك</h3>
+        <p className="muted" style={{ marginTop: 0 }}>
+          لكل جهاز شهادة خاصة. الربط يمر بـ: طلب شهادة ← شهادة الامتثال (برمز OTP من بوابة فاتورة) ← ٦ فحوصات امتثال ← شهادة الإنتاج.
+        </p>
+        <label className="muted">البيئة{" "}
+          <select className="search" style={{ maxWidth: 260 }} value={env} onChange={(e) => setEnv(e.target.value as typeof env)}>
+            <option value="sandbox">{envAr.sandbox}</option>
+            <option value="simulation">{envAr.simulation}</option>
+            <option value="production">{envAr.production}</option>
+          </select>
+        </label>
+        <table style={{ marginTop: 12 }}>
+          <thead><tr><th>الجهاز</th><th>الحالة</th><th /></tr></thead>
+          <tbody>{rows?.map((t) => (
+            <tr key={t.id}>
+              <td>{t.name}<div className="muted" style={{ fontSize: 12 }}>{t.prefix}</div></td>
+              <td>
+                {t.zatca_status === "ONBOARDED"
+                  ? <span className="badge ok">مربوط ✓ ({envAr[t.zatca_env ?? ""] ?? t.zatca_env})</span>
+                  : <span className="badge">غير مربوط</span>}
+                {t.zatca_last_error && <div className="error" style={{ fontSize: 12 }}>{t.zatca_last_error}</div>}
+              </td>
+              <td><button className="btn primary" disabled={busy === t.id} onClick={() => onboard(t.id)}>{busy === t.id ? "جارٍ الربط…" : t.zatca_status === "ONBOARDED" ? "إعادة الربط" : "ربط"}</button></td>
+            </tr>
+          ))}</tbody>
+        </table>
+      </div>
+      {result && (
+        <div className="panel">
+          <h3>نتيجة فحوصات الامتثال</h3>
+          <table><tbody>{result.checks.map((c) => (
+            <tr key={c.type}><td>{c.type}</td><td>{c.errors.length ? <span className="error">{c.errors.join(" · ")}</span> : <span className="badge ok">{c.result}</span>}</td></tr>
+          ))}</tbody></table>
+        </div>
+      )}
     </>
   );
 }

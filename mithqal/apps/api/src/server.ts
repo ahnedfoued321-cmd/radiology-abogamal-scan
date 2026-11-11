@@ -5,12 +5,6 @@ import { createPool } from "./db.js";
 import { migrate } from "./migrate.js";
 import { HttpZatcaClient, MockZatcaClient, reportPending, RoutingClient } from "./services/einvoice-worker.js";
 
-const ZATCA_URLS = {
-  sandbox: "https://gw-fatoora.zatca.gov.sa/e-invoicing/developer-portal",
-  simulation: "https://gw-fatoora.zatca.gov.sa/e-invoicing/simulation",
-  production: "https://gw-fatoora.zatca.gov.sa/e-invoicing/core",
-} as const;
-
 const config = loadConfig();
 await migrate(config.migrationUrl);
 const db = createPool(config.appUrl);
@@ -23,7 +17,7 @@ const zatca = new RoutingClient({
   ZATCA:
     config.zatcaMode === "mock"
       ? new MockZatcaClient()
-      : new HttpZatcaClient(ZATCA_URLS[config.zatcaMode], process.env.ZATCA_CSID_TOKEN ?? "", process.env.ZATCA_CSID_SECRET ?? ""),
+      : new HttpZatcaClient(), // uses each terminal's own production CSID (see /v1/terminals/:id/zatca/onboard)
   // ETA receipt submission (OAuth POS client credentials) is the next integration; receipts queue until then.
   ETA: config.zatcaMode === "mock" ? new MockZatcaClient() : undefined,
 });

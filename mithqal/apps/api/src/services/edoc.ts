@@ -35,6 +35,7 @@ export interface TerminalRow {
   last_hash: string;
   private_key_pem: string;
   public_key_pem: string;
+  zatca_pcsid_token?: string | null;
 }
 
 export interface EDocLine {
@@ -103,7 +104,8 @@ export async function issueEDocument(tx: Tx, d: EDocInput): Promise<void> {
         },
       },
       { icv: Number(d.terminal.icv), lastHash: d.terminal.last_hash },
-      { privateKeyPem: d.terminal.private_key_pem, publicKeyPem: d.terminal.public_key_pem },
+      // Onboarded devices sign with their ZATCA certificate (full XAdES); others produce dev documents.
+      { privateKeyPem: d.terminal.private_key_pem, publicKeyPem: d.terminal.public_key_pem, certificate: d.terminal.zatca_pcsid_token ?? undefined },
     );
     doc = {
       authority: "ZATCA", mode: d.kind === "STANDARD" ? "CLEARANCE" : "REPORTING",
