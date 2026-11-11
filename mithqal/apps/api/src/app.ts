@@ -504,6 +504,7 @@ export function buildApp(db: Db, config: Config, platformDb?: Db, llm?: LlmClien
         housing: money.optional(),
         transport: money.optional(),
         otherAllowances: money.optional(),
+        gosiFirstRegistered: date.optional(),
         documents: z.array(z.object({ kind: z.enum(["IQAMA", "PASSPORT", "HEALTH_CERT", "DRIVING_LICENSE", "CONTRACT", "OTHER"]), number: z.string().optional(), expiryDate: date })).optional(),
       })
       .parse(req.body);

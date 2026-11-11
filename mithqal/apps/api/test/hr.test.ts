@@ -70,6 +70,26 @@ describe("HR & payroll (KSA)", () => {
     expect(tb.body.rows.find((x: any) => x.code === "2120").balance).toBe("-15075.00"); // salaries payable = bank file total
   });
 
+  it("applies the 2024 social insurance law (10% annuities in 2026) to new Saudi entrants only", async () => {
+    const t2 = (await call("POST", "/v1/onboarding", undefined, {
+      businessNameAr: "شركة القانون الجديد", country: "SA", industry: "services", vatNumber: "310122393500003",
+      owner: { fullName: "مالك", email: "owner2@hr.test", password: "OwnerPass#1" },
+    })).body.token;
+    await call("POST", "/v1/hr/employees", t2, { fullName: "سارة (نظام قديم)", nationality: "SA", hireDate: "2020-01-01", basicSalary: "8000.00", housing: "2000.00" });
+    await call("POST", "/v1/hr/employees", t2, {
+      fullName: "خالد (نظام جديد)", nationality: "SA", hireDate: "2025-01-01", gosiFirstRegistered: "2025-01-01", basicSalary: "8000.00", housing: "2000.00",
+    });
+    const oct = (await call("POST", "/v1/hr/payroll", t2, { period: "2026-10" })).body;
+    const old = oct.payslips.find((p: any) => p.full_name.includes("قديم"));
+    const neu = oct.payslips.find((p: any) => p.full_name.includes("جديد"));
+    expect(old.employee_contrib).toBe("975.00");   // 9% + 0.75% of 10,000
+    expect(neu.employee_contrib).toBe("1075.00");  // 10% + 0.75% (step from 3 Jul 2026)
+    expect(neu.employer_contrib).toBe("1275.00");  // 10% + 0.75% + 2%
+    // June 2026 is still on the 9.5% step
+    const jun = (await call("POST", "/v1/hr/payroll", t2, { period: "2026-06" })).body;
+    expect(jun.payslips.find((p: any) => p.full_name.includes("جديد")).employee_contrib).toBe("1025.00");
+  });
+
   it("exports the salary bank file", async () => {
     const f = await call("GET", "/v1/hr/payroll/2026-10/bank-file", token);
     expect(f.headers["content-type"]).toContain("text/csv");

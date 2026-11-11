@@ -13,6 +13,8 @@ export interface EmployeeInput {
   housing?: string;
   transport?: string;
   otherAllowances?: string;
+  /** First registration date with GOSI; on/after 2024-07-03 → new social insurance law rates. */
+  gosiFirstRegistered?: string;
   documents?: { kind: string; number?: string; expiryDate: string }[];
 }
 
@@ -20,10 +22,10 @@ export async function createEmployee(tx: Tx, actor: Actor, e: EmployeeInput) {
   if (e.iban && !/^[A-Z]{2}\d{2}[A-Z0-9]{10,30}$/.test(e.iban.replace(/\s/g, ""))) throw new BusinessError("رقم الآيبان غير صحيح");
   const row = await one<{ id: string }>(
     tx,
-    `INSERT INTO employees (tenant_id, full_name, nationality, national_id, iban, hire_date, basic_salary, housing, transport, other_allowances)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
+    `INSERT INTO employees (tenant_id, full_name, nationality, national_id, iban, hire_date, basic_salary, housing, transport, other_allowances, gosi_first_registered)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
     [actor.tenantId, e.fullName, e.nationality.toUpperCase(), e.nationalId ?? null, e.iban?.replace(/\s/g, "") ?? null, e.hireDate,
-      e.basicSalary, e.housing ?? "0", e.transport ?? "0", e.otherAllowances ?? "0"],
+      e.basicSalary, e.housing ?? "0", e.transport ?? "0", e.otherAllowances ?? "0", e.gosiFirstRegistered ?? null],
   );
   for (const d of e.documents ?? []) {
     await tx.query("INSERT INTO employee_documents (tenant_id, employee_id, kind, number, expiry_date) VALUES ($1,$2,$3,$4,$5)", [
@@ -35,7 +37,15 @@ export async function createEmployee(tx: Tx, actor: Actor, e: EmployeeInput) {
 }
 
 /** Rules in force for the period end, latest effective_from per code. */
-async function rulesFor(tx: Tx, country: string, appliesTo: "NATIONAL" | "EXPAT", periodEnd: string): Promise<ContributionRule[]> {
+/** KSA: the 2024 law applies to nationals first registered on/after this date. */
+export const NEW_LAW_FROM = "2024-07-03";
+
+export function insuranceCategory(e: { nationality: string; gosi_first_registered: string | null }, country: string): "NATIONAL" | "NATIONAL_NEW" | "EXPAT" {
+  if (e.nationality !== country) return "EXPAT";
+  return e.gosi_first_registered && e.gosi_first_registered >= NEW_LAW_FROM ? "NATIONAL_NEW" : "NATIONAL";
+}
+
+async function rulesFor(tx: Tx, country: string, appliesTo: "NATIONAL" | "NATIONAL_NEW" | "EXPAT", periodEnd: string): Promise<ContributionRule[]> {
   const r = await tx.query<{ code: string; employee_pct: string; employer_pct: string }>(
     `SELECT DISTINCT ON (code) code, employee_pct, employer_pct FROM contribution_rules
       WHERE country=$1 AND applies_to=$2 AND effective_from <= $3 ORDER BY code, effective_from DESC`,
@@ -51,14 +61,15 @@ export async function runPayroll(tx: Tx, actor: Actor, input: { period: string; 
   const company = await one<{ country: string; currency: string }>(tx, "SELECT country, currency FROM companies LIMIT 1");
   const [y, m] = input.period.split("-").map(Number) as [number, number];
   const periodEnd = new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10);
-  const emps = await tx.query<{ id: string; full_name: string; nationality: string; basic_salary: string; housing: string; transport: string; other_allowances: string }>(
-    "SELECT * FROM employees WHERE active AND hire_date <= $1 ORDER BY full_name", [periodEnd],
+  const emps = await tx.query<{ id: string; full_name: string; nationality: string; gosi_first_registered: string | null; basic_salary: string; housing: string; transport: string; other_allowances: string }>(
+    "SELECT *, to_char(gosi_first_registered,'YYYY-MM-DD') AS gosi_first_registered FROM employees WHERE active AND hire_date <= $1 ORDER BY full_name", [periodEnd],
   );
   if (!emps.rowCount) throw new BusinessError("لا يوجد موظفون نشطون لهذه الفترة");
   const runId = crypto.randomUUID();
   const slips: { employee: (typeof emps.rows)[number]; p: ReturnType<typeof computePayslip> }[] = [];
   for (const e of emps.rows) {
-    const rules = await rulesFor(tx, company.country, e.nationality === company.country ? "NATIONAL" : "EXPAT", periodEnd);
+    // Rates in force at the period end (KSA steps change on 3 July, so the July run uses the new step).
+    const rules = await rulesFor(tx, company.country, insuranceCategory(e, company.country), periodEnd);
     const p = computePayslip({
       basic: e.basic_salary, housing: e.housing, transport: e.transport, other: e.other_allowances,
       deductions: input.deductions?.[e.id], rules, currency: company.currency,

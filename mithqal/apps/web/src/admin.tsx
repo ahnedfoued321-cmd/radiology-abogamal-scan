@@ -330,6 +330,7 @@ function Payroll({ toast }: { toast: (s: string) => void }) {
       await api("POST", "/v1/hr/employees", {
         fullName: v("name"), nationality: v("nat").toUpperCase(), hireDate: v("hire"), basicSalary: v("basic"),
         housing: v("housing") || undefined, transport: v("transport") || undefined, iban: v("iban") || undefined,
+        gosiFirstRegistered: v("gosi") || undefined,
         documents: v("iqama") ? [{ kind: "IQAMA", expiryDate: v("iqama") }] : undefined,
       });
       form.reset();
@@ -393,6 +394,7 @@ function Payroll({ toast }: { toast: (s: string) => void }) {
           <div className="two"><label>تاريخ التعيين<input name="hire" type="date" required /></label><label>الراتب الأساسي<input name="basic" required inputMode="decimal" pattern="\d+(\.\d{1,2})?" /></label></div>
           <div className="two"><label>بدل السكن<input name="housing" inputMode="decimal" /></label><label>بدل النقل<input name="transport" inputMode="decimal" /></label></div>
           <div className="two"><label>الآيبان<input name="iban" /></label><label>انتهاء الإقامة<input name="iqama" type="date" /></label></div>
+          <label>أول تسجيل في التأمينات (للسعوديين — يحدد نظام 2024 الجديد)<input name="gosi" type="date" /></label>
           <button className="btn primary">إضافة</button>
         </form>
       </div>
